@@ -10,3 +10,12 @@ kira_session/
 whatsapp_api_node/node_modules/
 kira-v3/__pycache__/
 Aula automacao/Controle_PC/whatsapp_api_node/node_modules/
+auth_info_baileys/
+memory/
+*.json
+!package.json
+!package-lock.json
+!composer.json
+!tsconfig.json
+!metadata.json
+!bridge.log
