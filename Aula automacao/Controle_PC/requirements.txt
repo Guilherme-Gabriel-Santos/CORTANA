@@ -16,3 +16,9 @@ playwright
 yt-dlp
 pygetwindow
 pyautogui
+wakeonlan
+broadlink
+pywebostv
+samsungtvws
+androidtv
+adb-shell
