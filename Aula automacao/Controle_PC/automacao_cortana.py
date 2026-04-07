@@ -1,591 +1,582 @@
+from __future__ import annotations
+
+import asyncio
+import logging
 import os
 import shutil
-import logging
-import asyncio
-import webbrowser
-import zipfile
 import subprocess
+import threading
 import urllib.parse
-from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-from ctypes import cast, POINTER
-from comtypes import CLSCTX_ALL
+from pathlib import Path
+
 import screen_brightness_control as sbc
 import spotipy
+from dotenv import load_dotenv
+from pycaw.pycaw import AudioUtilities
 from spotipy.oauth2 import SpotifyOAuth
-import socket
 from wakeonlan import send_magic_packet
+
+load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 
+
 class CortanaControl:
-    def __init__(self):
+    def __init__(self) -> None:
         self.shortcuts = {
             "youtube": "https://www.youtube.com",
             "github": "https://www.github.com",
             "chatgpt": "https://chat.openai.com",
             "google": "https://www.google.com",
-            "instagram": "https://www.instagram.com"
+            "instagram": "https://www.instagram.com",
         }
-        self.home = os.path.expanduser('~')
-        self.desktop = os.path.join(self.home, 'Desktop')
-        self.documents = os.path.join(self.home, 'Documents')
-        self.downloads = os.path.join(self.home, 'Downloads')
+        self.home = Path.home()
+        self.desktop = self.home / "Desktop"
+        self.documents = self.home / "Documents"
+        self.downloads = self.home / "Downloads"
         self.base_folders = {
             "area de trabalho": self.desktop,
-            "área de trabalho": self.desktop,
             "desktop": self.desktop,
             "documentos": self.documents,
             "documents": self.documents,
-            "downloads": self.downloads
+            "downloads": self.downloads,
         }
         self.ignore_folders = {
-            "venv", ".venv", "env", "node_modules", "__pycache__", ".git", ".idea", ".vscode"
+            "venv",
+            ".venv",
+            "env",
+            "node_modules",
+            "__pycache__",
+            ".git",
+            ".idea",
+            ".vscode",
         }
+        self.allowed_roots = [self.desktop.resolve(), self.documents.resolve(), self.downloads.resolve()]
 
-    def _resolver_caminho(self, caminho):
-        """Traduz apelidos (como 'Área de Trabalho') para caminhos reais e garante caminhos absolutos."""
-        caminho = caminho.strip('\'"').replace('\\', '/')
-        caminho_lower = caminho.lower()
+    def _resolve_path(self, raw_path: str) -> Path:
+        cleaned = raw_path.strip('\'"').replace("\\", "/")
+        lowered = cleaned.lower()
 
-        # Verifica se o caminho começa com um dos apelidos (ex: "desktop/pasta" ou "desktop")
         for alias, real_path in self.base_folders.items():
-            if caminho_lower == alias:
-                return real_path
-            if caminho_lower.startswith(alias + "/"):
-                # Substitui o alias pelo caminho real no início da string
-                return os.path.abspath(os.path.join(real_path, caminho[len(alias)+1:]))
-        
-        # Se for um caminho relativo simples, assume que é no Desktop por padrão
-        if not os.path.isabs(caminho) and not caminho.startswith('.'):
-            return os.path.abspath(os.path.join(self.desktop, caminho))
-            
-        return os.path.abspath(os.path.expanduser(caminho))
+            if lowered == alias:
+                return real_path.resolve()
+            if lowered.startswith(alias + "/"):
+                relative_part = cleaned[len(alias) + 1 :]
+                return (real_path / relative_part).resolve()
 
-    def _walk_seguro(self, base):
-        """os.walk que ignora pastas irrelevantes para performance e segurança."""
+        if not os.path.isabs(cleaned) and not cleaned.startswith("."):
+            return (self.desktop / cleaned).resolve()
+
+        return Path(os.path.expanduser(cleaned)).resolve()
+
+    def _is_relative_to(self, path_obj: Path, root_obj: Path) -> bool:
+        try:
+            path_obj.relative_to(root_obj)
+            return True
+        except ValueError:
+            return False
+
+    def _ensure_managed_path(
+        self,
+        path_obj: Path,
+        operation: str,
+        *,
+        must_exist: bool = False,
+        protect_root: bool = True,
+    ) -> Path:
+        resolved = path_obj.resolve(strict=False)
+        if not any(self._is_relative_to(resolved, root) for root in self.allowed_roots):
+            raise ValueError(
+                f"{operation} so e permitido dentro de Desktop, Documents ou Downloads."
+            )
+        if protect_root and any(resolved == root for root in self.allowed_roots):
+            raise ValueError(f"{operation} nao pode ser executado na raiz de {resolved}.")
+        if must_exist and not resolved.exists():
+            raise FileNotFoundError(f"Caminho nao encontrado: {resolved}")
+        return resolved
+
+    def _walk_safe(self, base: Path):
         for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = [d for d in dirnames if d not in self.ignore_folders and not d.startswith('.')]
-            yield dirpath, dirnames, filenames
+            dirnames[:] = [d for d in dirnames if d not in self.ignore_folders and not d.startswith(".")]
+            yield Path(dirpath), dirnames, filenames
 
-    # --- Manipulação de Arquivos e Pastas ---
-
-    def cria_pasta(self, caminho):
+    def cria_pasta(self, caminho: str) -> str:
         try:
-            caminho_abs = self._resolver_caminho(caminho)
-            os.makedirs(caminho_abs, exist_ok=True)
-            return f"Pasta criada com sucesso: {caminho_abs}"
-        except Exception as e:
-            return f"Erro ao criar pasta: {str(e)}"
+            path_obj = self._ensure_managed_path(
+                self._resolve_path(caminho),
+                "Criar pasta",
+                protect_root=False,
+            )
+            path_obj.mkdir(parents=True, exist_ok=True)
+            return f"Pasta criada com sucesso: {path_obj}"
+        except Exception as exc:
+            return f"Erro ao criar pasta: {exc}"
 
-    def abrir_pasta(self, nome_pasta):
-        """Tenta encontrar e abrir uma pasta pelo nome nos locais principais."""
+    def abrir_pasta(self, nome_pasta: str) -> str:
         try:
-            # Caso o usuário passe o nome de um local conhecido
-            caminho_direto = self.base_folders.get(nome_pasta.lower())
-            if caminho_direto and os.path.exists(caminho_direto):
-                os.startfile(caminho_direto)
+            direct_path = self.base_folders.get(nome_pasta.lower())
+            if direct_path and direct_path.exists():
+                os.startfile(str(direct_path))
                 return f"Abrindo {nome_pasta}."
 
-            # Busca recursiva nos locais base
             for base_name, base_path in self.base_folders.items():
-                if base_name in ["area de trabalho", "documentos", "downloads"]:
-                    for dirpath, dirnames, _ in self._walk_seguro(base_path):
-                        for d in dirnames:
-                            if d.lower() == nome_pasta.lower():
-                                full_path = os.path.join(dirpath, d)
-                                os.startfile(full_path)
-                                return f"Pasta encontrada e aberta em: {full_path}"
-            
-            return f"Pasta '{nome_pasta}' não encontrada nos locais padrão."
-        except Exception as e:
-            return f"Erro ao abrir pasta: {str(e)}"
+                if base_name not in {"area de trabalho", "documentos", "downloads"}:
+                    continue
+                for dirpath, dirnames, _ in self._walk_safe(base_path):
+                    for dirname in dirnames:
+                        if dirname.lower() == nome_pasta.lower():
+                            full_path = dirpath / dirname
+                            os.startfile(str(full_path))
+                            return f"Pasta encontrada e aberta em: {full_path}"
 
-    def buscar_e_abrir_arquivo(self, nome_arquivo):
-        """Busca um arquivo por nome e abre o primeiro resultado."""
+            return f"Pasta '{nome_pasta}' nao encontrada nos locais padrao."
+        except Exception as exc:
+            return f"Erro ao abrir pasta: {exc}"
+
+    def buscar_e_abrir_arquivo(self, nome_arquivo: str) -> str:
         try:
-            for _, base_path in self.base_folders.items():
-                for dirpath, _, filenames in self._walk_seguro(base_path):
-                    for f in filenames:
-                        if nome_arquivo.lower() in f.lower():
-                            full_path = os.path.join(dirpath, f)
-                            os.startfile(full_path)
+            for base_path in self.base_folders.values():
+                for dirpath, _, filenames in self._walk_safe(base_path):
+                    for filename in filenames:
+                        if nome_arquivo.lower() in filename.lower():
+                            full_path = dirpath / filename
+                            os.startfile(str(full_path))
                             return f"Arquivo encontrado e aberto: {full_path}"
-            return f"Arquivo '{nome_arquivo}' não encontrado."
-        except Exception as e:
-            return f"Erro ao buscar/abrir arquivo: {str(e)}"
+            return f"Arquivo '{nome_arquivo}' nao encontrado."
+        except Exception as exc:
+            return f"Erro ao buscar/abrir arquivo: {exc}"
 
-    def deletar_arquivo(self, caminho):
+    def deletar_arquivo(self, caminho: str) -> str:
         try:
-            path_abs = self._resolver_caminho(caminho)
-            if os.path.isfile(path_abs):
-                os.remove(path_abs)
-                return f"Arquivo deletado: {path_abs}"
-            elif os.path.isdir(path_abs):
-                shutil.rmtree(path_abs)
-                return f"Diretório deletado: {path_abs}"
-            return f"Caminho não encontrado: {path_abs}"
-        except Exception as e:
-            return f"Erro ao deletar: {str(e)}"
+            path_obj = self._ensure_managed_path(
+                self._resolve_path(caminho),
+                "Excluir",
+                must_exist=True,
+            )
+            if path_obj.is_file():
+                path_obj.unlink()
+                return f"Arquivo deletado: {path_obj}"
+            if path_obj.is_dir():
+                shutil.rmtree(path_obj)
+                return f"Diretorio deletado: {path_obj}"
+            return f"Caminho nao encontrado: {path_obj}"
+        except Exception as exc:
+            return f"Erro ao deletar: {exc}"
 
-    def limpar_diretorio(self, caminho):
+    def limpar_diretorio(self, caminho: str) -> str:
         try:
-            path_abs = self._resolver_caminho(caminho)
-            if os.path.exists(path_abs):
-                for item in os.listdir(path_abs):
-                    item_path = os.path.join(path_abs, item)
-                    if os.path.isfile(item_path): os.remove(item_path)
-                    elif os.path.isdir(item_path): shutil.rmtree(item_path)
-                return f"Diretório limpo: {path_abs}"
-            return "Diretório não encontrado."
-        except Exception as e:
-            return f"Erro ao limpar diretório: {str(e)}"
+            path_obj = self._ensure_managed_path(
+                self._resolve_path(caminho),
+                "Limpar diretorio",
+                must_exist=True,
+            )
+            if not path_obj.is_dir():
+                return f"O caminho informado nao e um diretorio: {path_obj}"
 
-    def mover_item(self, origem, destino):
-        try:
-            origem_abs = self._resolver_caminho(origem)
-            destino_abs = self._resolver_caminho(destino)
-            shutil.move(origem_abs, destino_abs)
-            return f"Movido de {origem_abs} para {destino_abs}."
-        except Exception as e:
-            return f"Erro ao mover: {str(e)}"
+            for item in path_obj.iterdir():
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+            return f"Diretorio limpo: {path_obj}"
+        except Exception as exc:
+            return f"Erro ao limpar diretorio: {exc}"
 
-    def copiar_item(self, origem, destino):
+    def mover_item(self, origem: str, destino: str) -> str:
         try:
-            origem_abs = self._resolver_caminho(origem)
-            destino_abs = self._resolver_caminho(destino)
-            if os.path.isdir(origem_abs): shutil.copytree(origem_abs, destino_abs)
-            else: shutil.copy2(origem_abs, destino_abs)
-            return f"Copiado de {origem_abs} para {destino_abs}."
-        except Exception as e:
-            return f"Erro ao copiar: {str(e)}"
+            origem_obj = self._ensure_managed_path(
+                self._resolve_path(origem),
+                "Mover",
+                must_exist=True,
+            )
+            destino_obj = self._ensure_managed_path(
+                self._resolve_path(destino),
+                "Mover",
+                protect_root=False,
+            )
+            shutil.move(str(origem_obj), str(destino_obj))
+            return f"Movido de {origem_obj} para {destino_obj}."
+        except Exception as exc:
+            return f"Erro ao mover: {exc}"
 
-    def renomear_item(self, caminho, novo_nome):
+    def copiar_item(self, origem: str, destino: str) -> str:
         try:
-            path_abs = self._resolver_caminho(caminho)
-            diretorio = os.path.dirname(path_abs)
-            novo_caminho = os.path.join(diretorio, novo_nome)
-            os.rename(path_abs, novo_caminho)
+            origem_obj = self._ensure_managed_path(
+                self._resolve_path(origem),
+                "Copiar",
+                must_exist=True,
+            )
+            destino_obj = self._ensure_managed_path(
+                self._resolve_path(destino),
+                "Copiar",
+                protect_root=False,
+            )
+            if origem_obj.is_dir():
+                shutil.copytree(origem_obj, destino_obj)
+            else:
+                shutil.copy2(origem_obj, destino_obj)
+            return f"Copiado de {origem_obj} para {destino_obj}."
+        except Exception as exc:
+            return f"Erro ao copiar: {exc}"
+
+    def renomear_item(self, caminho: str, novo_nome: str) -> str:
+        try:
+            path_obj = self._ensure_managed_path(
+                self._resolve_path(caminho),
+                "Renomear",
+                must_exist=True,
+            )
+            new_path = path_obj.parent / novo_nome
+            os.rename(path_obj, new_path)
             return f"Renomeado para {novo_nome}."
-        except Exception as e:
-            return f"Erro ao renomear: {str(e)}"
+        except Exception as exc:
+            return f"Erro ao renomear: {exc}"
 
-    def organizar_pasta(self, caminho):
+    def organizar_pasta(self, caminho: str) -> str:
         try:
-            path_abs = self._resolver_caminho(caminho)
-            extensoes = {
-                'Imagens': ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'],
-                'Documentos': ['.pdf', '.doc', '.docx', '.txt', '.xlsx', '.pptx', '.csv'],
-                'Videos': ['.mp4', '.mkv', '.avi', '.mov'],
-                'Musicas': ['.mp3', '.wav', '.flac'],
-                'Compactados': ['.zip', '.rar', '.7z'],
-                'Executaveis': ['.exe', '.msi', '.bat']
+            path_obj = self._ensure_managed_path(
+                self._resolve_path(caminho),
+                "Organizar pasta",
+                must_exist=True,
+            )
+            if not path_obj.is_dir():
+                return f"O caminho informado nao e uma pasta: {path_obj}"
+
+            extensions = {
+                "Imagens": [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"],
+                "Documentos": [".pdf", ".doc", ".docx", ".txt", ".xlsx", ".pptx", ".csv"],
+                "Videos": [".mp4", ".mkv", ".avi", ".mov"],
+                "Musicas": [".mp3", ".wav", ".flac"],
+                "Compactados": [".zip", ".rar", ".7z"],
+                "Executaveis": [".exe", ".msi", ".bat"],
             }
 
-            for item in os.listdir(path_abs):
-                item_path = os.path.join(path_abs, item)
-                if os.path.isfile(item_path):
-                    ext = os.path.splitext(item)[1].lower()
-                    movido = False
-                    for pasta, exts in extensoes.items():
-                        if ext in exts:
-                            pasta_destino = os.path.join(path_abs, pasta)
-                            os.makedirs(pasta_destino, exist_ok=True)
-                            shutil.move(item_path, os.path.join(pasta_destino, item))
-                            movido = True
-                            break
-                    if not movido:
-                        pasta_outros = os.path.join(path_abs, 'Outros')
-                        os.makedirs(pasta_outros, exist_ok=True)
-                        shutil.move(item_path, os.path.join(pasta_outros, item))
+            for item in path_obj.iterdir():
+                if not item.is_file():
+                    continue
+                extension = item.suffix.lower()
+                destination_dir = path_obj / "Outros"
+                for folder_name, extension_list in extensions.items():
+                    if extension in extension_list:
+                        destination_dir = path_obj / folder_name
+                        break
+                destination_dir.mkdir(exist_ok=True)
+                shutil.move(str(item), str(destination_dir / item.name))
+
             return "Pasta organizada com sucesso."
-        except Exception as e:
-            return f"Erro ao organizar pasta: {str(e)}"
+        except Exception as exc:
+            return f"Erro ao organizar pasta: {exc}"
 
-    def compactar_pasta(self, caminho):
+    def compactar_pasta(self, caminho: str) -> str:
         try:
-            path_abs = self._resolver_caminho(caminho).rstrip('/\\')
-            shutil.make_archive(path_abs, 'zip', path_abs)
-            return f"Compactado em: {path_abs}.zip"
-        except Exception as e:
-            return f"Erro ao compactar: {str(e)}"
+            path_obj = self._ensure_managed_path(
+                self._resolve_path(caminho),
+                "Compactar pasta",
+                must_exist=True,
+            )
+            archive_base = str(path_obj).rstrip("/\\")
+            shutil.make_archive(archive_base, "zip", archive_base)
+            return f"Compactado em: {archive_base}.zip"
+        except Exception as exc:
+            return f"Erro ao compactar: {exc}"
 
-    # --- Controle de Sistema ---
-
-    def controle_volume(self, nivel):
-        """Define o volume entre 0 e 100"""
+    def controle_volume(self, nivel: int) -> str:
         try:
-            nivel = max(0, min(100, int(nivel)))
+            level = max(0, min(100, int(nivel)))
             import comtypes
+
             comtypes.CoInitialize()
             devices = AudioUtilities.GetSpeakers()
             volume = devices.EndpointVolume
-            volume.SetMasterVolumeLevelScalar(nivel / 100, None)
-            return f"Volume ajustado para {nivel}%."
-        except Exception as e:
-            return f"Erro ao ajustar volume: {str(e)}"
+            volume.SetMasterVolumeLevelScalar(level / 100, None)
+            return f"Volume ajustado para {level}%."
+        except Exception as exc:
+            return f"Erro ao ajustar volume: {exc}"
 
-    def controle_brilho(self, nivel):
-        """Define o brilho entre 0 e 100"""
+    def controle_brilho(self, nivel: int) -> str:
         try:
-            nivel = max(0, min(100, int(nivel)))
-            sbc.set_brightness(nivel)
-            return f"Brilho ajustado para {nivel}%."
-        except Exception as e:
-            return f"Erro ao ajustar brilho: {str(e)}"
+            level = max(0, min(100, int(nivel)))
+            sbc.set_brightness(level)
+            return f"Brilho ajustado para {level}%."
+        except Exception as exc:
+            return f"Erro ao ajustar brilho: {exc}"
 
-    def abrir_aplicativo(self, nome_app):
-        """Abre um aplicativo no sistema pelo nome com busca inteligente."""
+    def abrir_aplicativo(self, nome_app: str) -> str:
         try:
             apps = {
                 "bloco de notas": "notepad.exe",
                 "calculadora": "calc.exe",
                 "paint": "mspaint.exe",
                 "cmd": "cmd.exe",
-                "navegador": "start msedge",
+                "navegador": "msedge.exe",
                 "google chrome": "chrome.exe",
                 "chrome": "chrome.exe",
-                "word": "winword",
-                "excel": "excel",
-                "powerpoint": "powerpnt",
+                "word": "winword.exe",
+                "excel": "excel.exe",
+                "powerpoint": "powerpnt.exe",
                 "explorador de arquivos": "explorer.exe",
                 "configuracoes": "ms-settings:",
-                "configurações": "ms-settings:",
                 "spotify": "spotify:",
                 "vscode": "code",
-                "visual studio code": "code"
+                "visual studio code": "code",
             }
-            
-            nome_app_lower = nome_app.lower().strip()
-            comando = apps.get(nome_app_lower, nome_app_lower)
-            
-            # Tenta via os.startfile primeiro (melhor para protocolos e arquivos registrados)
+
+            command = apps.get(nome_app.lower().strip(), nome_app.strip())
             try:
-                os.startfile(comando)
+                os.startfile(command)
                 return f"Abrindo {nome_app}."
-            except:
+            except OSError:
                 pass
 
-            # Fallback 1: Tenta via subprocess (executáveis no PATH)
-            try:
-                subprocess.Popen(comando, shell=False)
-                return f"Iniciando {nome_app}."
-            except:
-                pass
-            
-            # Fallback 2: Busca inteligente com 'where'
-            try:
-                # Se for um protocolo (tem : no final ou ms-), pula o 'where'
-                if ":" not in comando:
-                    res = subprocess.check_output(['where', comando], stderr=subprocess.STDOUT, shell=True).decode('utf-8').strip().split('\n')[0]
-                    if res and os.path.exists(res):
-                        os.startfile(res)
-                        return f"Aplicativo '{nome_app}' encontrado em {res} e aberto."
-            except:
-                pass
+            subprocess.Popen([command], shell=False)
+            return f"Iniciando {nome_app}."
+        except Exception as exc:
+            return f"Nao foi possivel abrir {nome_app}: {exc}"
 
-            # Fallback 3: Tenta via 'start' no CMD (último recurso)
-            try: 
-                subprocess.Popen(['cmd', '/c', 'start', '', comando], shell=True)
-                return f"Comando enviado ao sistema para abrir {nome_app}."
-            except Exception as e:
-                return f"Não foi possível abrir {nome_app}: {str(e)}"
-                
-        except Exception as e:
-            return f"Erro ao abrir aplicativo: {str(e)}"
-
-    def tocar_musica_spotify(self, termo):
-        """Abre o Spotify e pesquisa/toca o termo solicitado usando a API oficial se disponível."""
+    def tocar_musica_spotify(self, termo: str) -> str:
         try:
-            # Tenta usar a API do Spotify (Spotipy) primeiro
             client_id = os.getenv("SPOTIPY_CLIENT_ID")
             client_secret = os.getenv("SPOTIPY_CLIENT_SECRET")
             redirect_uri = os.getenv("SPOTIPY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
 
             if client_id and client_secret:
                 try:
-                    sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-                        client_id=client_id,
-                        client_secret=client_secret,
-                        redirect_uri=redirect_uri,
-                        scope="user-modify-playback-state user-read-playback-state",
-                        open_browser=True
-                    ))
-
-                    # Busca a música/artista
-                    results = sp.search(q=termo, limit=1, type='track')
-                    if results['tracks']['items']:
-                        track_uri = results['tracks']['items'][0]['uri']
-                        track_name = results['tracks']['items'][0]['name']
-                        artist_name = results['tracks']['items'][0]['artists'][0]['name']
-                        
-                        # Tenta dar o play no dispositivo ativo
+                    spotify = spotipy.Spotify(
+                        auth_manager=SpotifyOAuth(
+                            client_id=client_id,
+                            client_secret=client_secret,
+                            redirect_uri=redirect_uri,
+                            scope="user-modify-playback-state user-read-playback-state",
+                            open_browser=True,
+                        )
+                    )
+                    results = spotify.search(q=termo, limit=1, type="track")
+                    if results["tracks"]["items"]:
+                        track = results["tracks"]["items"][0]
+                        track_uri = track["uri"]
+                        track_name = track["name"]
+                        artist_name = track["artists"][0]["name"]
                         try:
-                            sp.start_playback(uris=[track_uri])
+                            spotify.start_playback(uris=[track_uri])
                             return f"Tocando agora via API: {track_name} de {artist_name}."
-                        except Exception as e:
-                            # Se falhar o playback direto (ex: sem dispositivo ativo), 
-                            # abre o app com a URI e tenta o pyautogui como fallback
-                            subprocess.Popen(['cmd', '/c', 'start', '', track_uri], shell=True)
-                            self._iniciar_autoplay_pyautogui()
+                        except Exception:
+                            subprocess.Popen(["cmd", "/c", "start", "", track_uri], shell=True)
+                            self._start_spotify_autoplay()
                             return f"Iniciando {track_name} de {artist_name} no Spotify Desktop."
-                    
-                except Exception as e:
-                    print(f"Erro na API Spotify: {e}")
-                    # Continua para o fallback de busca por URI se a API falhar
-            
-            # Fallback: Protocolo URI + PyAutoGUI (original)
-            termo_encoded = urllib.parse.quote(termo)
-            uri = f"spotify:search:{termo_encoded}"
-            subprocess.Popen(['cmd', '/c', 'start', '', uri], shell=True)
-            self._iniciar_autoplay_pyautogui()
-            
+                except Exception as exc:
+                    logger.warning("[Spotify] API fallback triggered: %s", exc)
+
+            encoded_term = urllib.parse.quote(termo)
+            uri = f"spotify:search:{encoded_term}"
+            subprocess.Popen(["cmd", "/c", "start", "", uri], shell=True)
+            self._start_spotify_autoplay()
             return f"Buscando e tocando '{termo}' no Spotify..."
+        except Exception as exc:
+            return f"Erro ao processar Spotify: {exc}"
 
-        except Exception as e:
-            return f"Erro ao processar Spotify: {str(e)}"
+    def _start_spotify_autoplay(self) -> None:
+        def _autoplay() -> None:
+            try:
+                import pyautogui
+                import time as time_module
 
-    def _iniciar_autoplay_pyautogui(self):
-        """Inicia uma thread para pressionar as teclas de play no app desktop."""
+                time_module.sleep(5.0)
+                pyautogui.press("down")
+                time_module.sleep(0.2)
+                pyautogui.press("enter")
+            except Exception:
+                pass
+
         try:
-            import threading
-            def _autoplay():
-                try:
-                    import time
-                    import pyautogui
-                    time.sleep(5.0) # Espera o Spotify abrir e renderizar os resultados
-                    pyautogui.press('down') # Navega para o primeiro resultado
-                    time.sleep(0.2)
-                    pyautogui.press('enter') # Toca o resultado selecionado
-                except Exception:
-                    pass
-            
             threading.Thread(target=_autoplay, daemon=True).start()
         except Exception:
             pass
-        except Exception as e:
-            return f"Erro ao tocar música no Spotify: {str(e)}"
 
-    def atalhos_navegacao(self, site):
+    def atalhos_navegacao(self, site: str) -> str:
         try:
             url = self.shortcuts.get(site.lower())
-            if url:
-                os.startfile(url)
-                return f"Abrindo {site}."
-            return "Site não cadastrado."
-        except Exception as e:
-            return f"Erro ao abrir site: {str(e)}"
+            if not url:
+                return "Site nao cadastrado."
+            os.startfile(url)
+            return f"Abrindo {site}."
+        except Exception as exc:
+            return f"Erro ao abrir site: {exc}"
 
-    def pesquisar_no_google(self, termo):
+    def pesquisar_no_google(self, termo: str) -> str:
         try:
             url = f"https://www.google.com/search?q={urllib.parse.quote_plus(termo)}"
             os.startfile(url)
             return f"Pesquisando por {termo}."
-        except Exception as e:
-            return f"Erro ao pesquisar: {str(e)}"
+        except Exception as exc:
+            return f"Erro ao pesquisar: {exc}"
 
-    def energia_pc(self, acao):
+    def energia_pc(self, acao: str) -> str:
         try:
-            if acao == "desligar":
+            normalized = acao.lower().strip()
+            if normalized == "desligar":
                 os.system("shutdown /s /t 1")
                 return "Desligando o computador."
-            elif acao == "reiniciar":
+            if normalized == "reiniciar":
                 os.system("shutdown /r /t 1")
                 return "Reiniciando o computador."
-            elif acao == "bloquear":
+            if normalized == "bloquear":
                 subprocess.run(["rundll32.exe", "user32.dll,LockWorkStation"])
                 return "Computador bloqueado."
-            return "Ação inválida."
-        except Exception as e:
-            return f"Erro: {str(e)}"
+            return "Acao invalida."
+        except Exception as exc:
+            return f"Erro: {exc}"
 
-    def abrir_arquivo(self, caminho):
-        """Abre um arquivo pelo caminho completo."""
+    def abrir_arquivo(self, caminho: str) -> str:
         try:
-            path_abs = self._resolver_caminho(caminho)
-            if os.path.exists(path_abs):
-                os.startfile(path_abs)
-                return f"Abrindo arquivo {path_abs}."
-            return f"Arquivo não encontrado: {path_abs}"
-        except Exception as e:
-            return f"Erro ao abrir arquivo: {str(e)}"
+            path_obj = self._ensure_managed_path(
+                self._resolve_path(caminho),
+                "Abrir arquivo",
+                must_exist=True,
+                protect_root=False,
+            )
+            os.startfile(str(path_obj))
+            return f"Abrindo arquivo {path_obj}."
+        except Exception as exc:
+            return f"Erro ao abrir arquivo: {exc}"
 
-    # --- Controle de Dispositivos de Rede (Smart Home) ---
-
-    def wake_on_lan(self, mac_address):
-        """Envia um pacote Wake-on-LAN para ligar um dispositivo."""
+    def wake_on_lan(self, mac_address: str) -> str:
         try:
             send_magic_packet(mac_address)
             return f"Pacote Wake-on-LAN enviado para {mac_address}."
-        except Exception as e:
-            return f"Erro ao enviar WoL: {str(e)}"
+        except Exception as exc:
+            return f"Erro ao enviar WoL: {exc}"
 
-    def controle_tv_lg(self, ip, acao):
-        """Controle para Smart TVs LG WebOS."""
+    def controle_tv_lg(self, ip: str, acao: str) -> str:
         try:
-            from pywebostv.discovery import DiscoveryClient
             from pywebostv.connection import WebOSClient
-            from pywebostv.controls import InputControl, SystemControl, AudioControl
+            from pywebostv.controls import AudioControl, SystemControl
 
             client = WebOSClient(ip)
             client.connect()
-            
-            # Nota: O primeiro pareamento exigirá confirmação na TV
-            # Para simplicidade, assumimos que já foi pareado ou que o usuário vai confirmar
-            store = {} # Em uma implementação real, salvaríamos o token em arquivo
+
+            store = {}
             for status in client.register(store):
                 if status == WebOSClient.PROMPTED:
-                    return "Por favor, aceite a conexão na sua TV LG."
-                elif status == WebOSClient.REGISTERED:
-                    pass
+                    return "Por favor, aceite a conexao na sua TV LG."
 
             system = SystemControl(client)
             audio = AudioControl(client)
-
             if acao == "desligar":
-                # await self._session.generate_reply(...)  # COMENTADO para evitar erro 1008 de sobreposição
-                logger.warning(f"[SPEECH ADAPTER] Ignorando notificação proativa para evitar Erro 1008: {text}")
                 system.power_off()
                 return "Comando de desligar enviado para TV LG."
-            elif acao == "mute":
+            if acao == "mute":
                 audio.set_mute(True)
                 return "TV LG mutada."
-            elif acao == "unmute":
+            if acao == "unmute":
                 audio.set_mute(False)
                 return "TV LG desmutada."
-            return f"Ação '{acao}' não implementada para LG."
-        except Exception as e:
-            return f"Erro no controle LG: {str(e)}"
+            return f"Acao '{acao}' nao implementada para LG."
+        except Exception as exc:
+            return f"Erro no controle LG: {exc}"
 
-    def controle_tv_samsung(self, ip, acao):
-        """Controle para Smart TVs Samsung (Tizen)."""
+    def controle_tv_samsung(self, ip: str, acao: str) -> str:
         try:
             from samsungtvws import SamsungTVWS
+
             tv = SamsungTVWS(ip)
-            
             if acao == "desligar":
                 tv.shortcuts().power()
                 return "Comando de desligar enviado para TV Samsung."
-            elif acao == "volume_up":
+            if acao == "volume_up":
                 tv.shortcuts().volume_up()
                 return "Volume da TV Samsung aumentado."
-            elif acao == "volume_down":
+            if acao == "volume_down":
                 tv.shortcuts().volume_down()
-                return "Volume da TV Samsung diminuído."
-            return f"Ação '{acao}' não implementada para Samsung."
-        except Exception as e:
-            return f"Erro no controle Samsung: {str(e)}"
+                return "Volume da TV Samsung diminuido."
+            return f"Acao '{acao}' nao implementada para Samsung."
+        except Exception as exc:
+            return f"Erro no controle Samsung: {exc}"
 
-    def controle_dispositivo_broadlink(self, ip, acao, temperatura=None):
-        """Controle para IR Blasters Broadlink (Ar Condicionado, TVs antigas)."""
+    def controle_dispositivo_broadlink(self, ip: str, acao: str, temperatura=None) -> str:
         try:
             import broadlink
+
             devices = broadlink.discover(timeout=5, discover_ip_address=ip)
             if not devices:
-                return f"Dispositivo Broadlink não encontrado no IP {ip}."
-            
+                return f"Dispositivo Broadlink nao encontrado no IP {ip}."
+
             device = devices[0]
             device.auth()
-
             if acao == "aprender":
                 device.enter_learning_mode()
-                return "Broadlink em modo de aprendizado. Aponte o controle e aperte o botão."
-            
-            # Para enviar comandos, precisaríamos dos códigos IR salvos.
-            # Esta é uma implementação base que o usuário pode expandir.
-            return "Comando enviado ao Broadlink (implementação de base)."
-        except Exception as e:
-            return f"Erro no controle Broadlink: {str(e)}"
+                return "Broadlink em modo de aprendizado. Aponte o controle e aperte o botao."
+            return "Comando enviado ao Broadlink (implementacao de base)."
+        except Exception as exc:
+            return f"Erro no controle Broadlink: {exc}"
 
-    async def controle_tv_tcl(self, ip, acao):
-        """Controle para Smart TVs TCL (Android TV) via protocolo V2 (PIN)."""
+    async def controle_tv_tcl(self, ip: str, acao: str) -> str:
         try:
             from androidtvremote2 import AndroidTVRemote
-            import asyncio
-            
-            certfile = "memory/tcl_cert.pem"
-            keyfile = "memory/tcl_key.pem"
-            
-            if not os.path.exists(certfile):
-                return "Erro: Certificado não encontrado. Use o script pair_tcl.py primeiro."
+
+            certfile = Path("memory") / "tcl_cert.pem"
+            keyfile = Path("memory") / "tcl_key.pem"
+            if not certfile.exists():
+                return "Erro: certificado nao encontrado. Use o script pair_tcl.py primeiro."
 
             if acao == "ligar":
-                # MAC capturado via ARP: 78:66:9d:89:e3:7c
-                mac = "78:66:9d:89:e3:7c"
+                mac = os.getenv("TCL_TV_MAC", "78:66:9d:89:e3:7c")
                 self.wake_on_lan(mac)
-                return f"Enviado pacote Wake-on-LAN para ligar a TV TCL ({mac}). Verifique se a TV liga em alguns segundos."
+                return (
+                    f"Pacote Wake-on-LAN enviado para ligar a TV TCL ({mac}). "
+                    "Verifique se ela liga em alguns segundos."
+                )
 
             remote = AndroidTVRemote(
                 client_name="Cortana Assistant",
-                certfile=certfile,
-                keyfile=keyfile,
-                host=ip
+                certfile=str(certfile),
+                keyfile=str(keyfile),
+                host=ip,
             )
-
-                            # Conecta, envia comando e desconecta (pode ser otimizado mantendo a conexão)
             await remote.async_connect()
 
-            import androidtvremote2
-            from androidtvremote2 import AndroidTVRemote
-            
-            # Mapeamento de ações para KeyCodes
-            # 223: SLEEP (Geralmente mais eficaz que 26 para desligar Android TVs)
-            # 26: POWER, 3: HOME, 66: ENTER, 24: VOL_UP, 25: VOL_DOWN
             key_map = {
-                "desligar": 223, 
-                "power": 26,     
+                "desligar": 223,
+                "power": 26,
                 "sleep": 223,
                 "home": 3,
                 "confirmar": 66,
                 "vol_up": 24,
                 "vol_down": 25,
-                "ok": 66
+                "ok": 66,
             }
 
-            # Se for um número, usa direto como KeyCode (para debug)
             if acao == "desligar":
-                # Estratégia 'Máxima Compatibilidade' para TCL Android TV:
-                # 1. Home (garante que estamos fora de apps travados)
-                # 2. Sleep (comando 223 costuma ser mais direto para o standby modo)
-                # 3. Power (backup caso o sleep não pegue)
-                # 4. OK (confirma menus de desligamento se aparecerem)
-                
-                logger.info("[TCL] Iniciando sequência de desligamento robusta...")
-                remote.send_key_command(3)   # Home
+                logger.info("[TCL] Running robust shutdown sequence.")
+                remote.send_key_command(3)
                 await asyncio.sleep(1.5)
-                
-                remote.send_key_command(223) # Sleep (Standby direto)
+                remote.send_key_command(223)
                 await asyncio.sleep(1.0)
-                
-                remote.send_key_command(26)  # Power (Toggle)
+                remote.send_key_command(26)
                 await asyncio.sleep(0.5)
-                
-                remote.send_key_command(66)  # OK / ENTER
-                resp = "Sequência robusta (Home+Sleep+Power+OK) enviada para a TV TCL."
+                remote.send_key_command(66)
+                response = "Sequencia robusta (Home + Sleep + Power + OK) enviada para a TV TCL."
             elif acao.isdigit():
                 key_code = int(acao)
                 remote.send_key_command(key_code)
-                resp = f"KeyCode {key_code} enviado para TV TCL."
+                response = f"KeyCode {key_code} enviado para TV TCL."
             elif acao == "long_power":
-                # Tenta um pressionamento longo no botão de power (Start + 1s + End)
                 remote.send_key_command(26, direction="START_LONG")
                 await asyncio.sleep(1.0)
                 remote.send_key_command(26, direction="END_LONG")
-                resp = "Comando Power (Simulação Long Press) enviado para TV TCL."
+                response = "Comando Power (simulacao de long press) enviado para TV TCL."
             elif acao in key_map:
                 remote.send_key_command(key_map[acao])
-                resp = f"Comando '{acao}' enviado para TV TCL."
+                response = f"Comando '{acao}' enviado para TV TCL."
             else:
-                resp = f"Ação '{acao}' não mapeada para TCL."
-            
-            # Aguarda um pouco para o comando ser processado antes de fechar
+                response = f"Acao '{acao}' nao mapeada para TCL."
+
             await asyncio.sleep(0.5)
             remote.disconnect()
-            return resp
+            return response
+        except Exception as exc:
+            return f"Erro no controle TCL (V2): {exc}"
 
-        except Exception as e:
-            return f"Erro no controle TCL (V2): {str(e)}"
 
 if __name__ == "__main__":
-    # Teste rápido
     cortana = CortanaControl()
     print("Controle Cortana inicializado.")

@@ -1,21 +1,36 @@
 api keys.txt
-*.log
-__pycache__/
-node_modules/
+
+# Secrets
 .env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python
+__pycache__/
+*.pyc
 .venv/
 venv/
-*.pyc
-kira_session/
-whatsapp_api_node/node_modules/
-kira-v3/__pycache__/
-Aula automacao/Controle_PC/whatsapp_api_node/node_modules/
-auth_info_baileys/
+
+# Node / Next
+node_modules/
+.next/
+dist/
+build/
+
+# Runtime logs and generated state
+*.log
 memory/
-*.json
-!package.json
-!package-lock.json
-!composer.json
-!tsconfig.json
-!metadata.json
-!bridge.log
+auth_info_baileys/
+kira_session/
+
+# Project-specific generated files
+Aula automacao/Controle_PC/.cache
+Aula automacao/Controle_PC/bridge.log
+Aula automacao/Controle_PC/whatsapp_api_node/baileys_store.json
+Aula automacao/Controle_PC/whatsapp_api_node/auth_info_baileys/
+Aula automacao/Controle_PC/whatsapp_api_node/node_modules/
+Aula automacao/Controle_PC/kira_wpp/kira_session/
+backup_wpp_v1_legacy/kira_wpp/kira_session/
+kira-v3/__pycache__/
+Layout Cortana/agent-starter-react-main/.env.local

@@ -1,861 +1,658 @@
-from dotenv import load_dotenv
-from livekit import agents
-from livekit.agents import AgentSession, Agent, RoomInputOptions, ChatContext, llm
-from livekit.plugins import noise_cancellation, google
-from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
-from mem0 import AsyncMemoryClient
+from __future__ import annotations
+
+import asyncio
+import json
 import logging
 import os
-import asyncio
-import webbrowser
+import shlex
 import subprocess
-import psutil
-import json
-import glob
 import time
+import urllib.request as urllib_request
+import webbrowser
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import quote_plus
-import urllib.request as _urllib
 
-# ── WhatsApp Integration ──────────────────────────────────────────────────────
-from whatsapp_runtime import send_whatsapp_message, get_whatsapp_status
-import whatsapp_bridge as _wpp_bridge
-# ─────────────────────────────────────────────────────────────────────────────
+import psutil
+from dotenv import load_dotenv
+from livekit import agents
+from livekit.agents import Agent, AgentSession, ChatContext, RoomInputOptions, llm
+from livekit.plugins import google, noise_cancellation
+from mem0 import AsyncMemoryClient
 
-try:
-    import yt_dlp
-    YT_DLP_DISPONIVEL = True
-except ImportError:
-    YT_DLP_DISPONIVEL = False
+import whatsapp_bridge as whatsapp_bridge
+from automacao_cortana import CortanaControl
+from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
+from whatsapp_runtime import get_whatsapp_status, send_whatsapp_message
 
 try:
     from playwright.async_api import async_playwright
-    PLAYWRIGHT_DISPONIVEL = True
+
+    PLAYWRIGHT_AVAILABLE = True
 except ImportError:
-    PLAYWRIGHT_DISPONIVEL = False
+    PLAYWRIGHT_AVAILABLE = False
 
-from automacao_cortana import CortanaControl
-
-load_dotenv()
+load_dotenv(override=True)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────
-# CHROME + CDP
-# ─────────────────────────────────────────
+DEFAULT_MODEL = os.getenv("CORTANA_MODEL", "gemini-2.0-flash-exp")
+DEFAULT_USER_ID = os.getenv("CORTANA_USER_ID", "Guilherme")
+EPISODIC_MEMORY_DIR = Path("memory") / "episodic"
+CDP_URL = "http://localhost:9222"
+BLOCKED_COMMAND_TOKENS = (
+    "&&",
+    "||",
+    ";",
+    "|",
+    ">",
+    "<",
+    "powershell",
+    "pwsh",
+    "cmd /c",
+    "remove-item",
+    "del ",
+    "rmdir",
+    "shutdown",
+    "format",
+    "diskpart",
+    "reg delete",
+)
 
-def _get_chrome_path():
-    caminhos = [
+
+def _get_google_api_key() -> str | None:
+    google_key = os.getenv("GOOGLE_API_KEY")
+    if google_key:
+        return google_key.strip()
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    return gemini_key.strip() if gemini_key else None
+
+
+def _get_chrome_path() -> str | None:
+    candidates = (
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
-    ]
-    for c in caminhos:
-        if os.path.exists(c):
-            return c
+    )
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
     return None
 
-CHROME_PATH = _get_chrome_path()
-CDP_URL = "http://localhost:9222"
 
-def _cdp_disponivel() -> bool:
-    """Verifica se o Chrome já está rodando com depuração remota."""
+CHROME_PATH = _get_chrome_path()
+
+
+def _cdp_available() -> bool:
     try:
-        with _urllib.urlopen(f"{CDP_URL}/json/version", timeout=1) as r:
-            return r.status == 200
-    except:
+        with urllib_request.urlopen(f"{CDP_URL}/json/version", timeout=1) as response:
+            return response.status == 200
+    except Exception:
         return False
 
-async def _abrir_chrome_com_cdp(url: str = "about:blank"):
-    """Abre o Chrome com porta de depuração (CDP) e navega para a URL."""
+
+async def _open_chrome_with_cdp(url: str = "about:blank") -> bool:
     if not CHROME_PATH:
         webbrowser.open(url)
         return False
-    # Se o Chrome já está aberto COM cdp, só abre nova aba
-    if _cdp_disponivel():
+
+    if _cdp_available() and PLAYWRIGHT_AVAILABLE:
         try:
-            async with async_playwright() as p:
-                browser = await p.chromium.connect_over_cdp(CDP_URL)
-                page = await browser.contexts[0].new_page()
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.connect_over_cdp(CDP_URL)
+                context = browser.contexts[0] if browser.contexts else await browser.new_context()
+                page = await context.new_page()
                 await page.goto(url)
                 await browser.disconnect()
             return True
-        except:
-            pass
-    # Fecha o Chrome e reabre com depuração
-   # subprocess.run(["taskkill", "/f", "/im", "chrome.exe"], capture_output=True)
-    await asyncio.sleep(1)
-    subprocess.Popen([CHROME_PATH, f"--remote-debugging-port=9222", url])
+        except Exception as exc:
+            logger.warning("[CDP] Reusing existing Chrome failed: %s", exc)
+
+    subprocess.Popen([CHROME_PATH, "--remote-debugging-port=9222", url])
     await asyncio.sleep(2.5)
-    return _cdp_disponivel()
+    return _cdp_available()
 
 
-# ── WhatsApp Proactive Speech Adapter ──────────────────────────────────────────
+def _ensure_episodic_dir() -> None:
+    EPISODIC_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _command_is_blocked(command: str) -> bool:
+    normalized = " ".join(command.lower().split())
+    return any(token in normalized for token in BLOCKED_COMMAND_TOKENS)
+
+
+def _chat_item_to_text(item) -> str:
+    content = getattr(item, "content", None)
+    if content is None:
+        return ""
+    if isinstance(content, list):
+        return "".join(str(part) for part in content).strip()
+    return str(content).strip()
+
+
+async def _publish_room_data(session: AgentSession | None, payload: dict) -> None:
+    if not session or not getattr(session, "room", None):
+        return
+    await session.room.local_participant.publish_data(json.dumps(payload).encode("utf-8"))
+
+
+async def _load_user_memories(mem0_client: AsyncMemoryClient, user_id: str) -> str:
+    try:
+        logger.info("[Mem0] Loading memories for '%s'...", user_id)
+        response = await mem0_client.search(
+            query="historico, preferencias e informacoes pessoais do usuario",
+            filters={"user_id": user_id},
+            limit=5,
+        )
+    except Exception as exc:
+        logger.error("[Mem0] Failed to load memories: %s", exc)
+        return ""
+
+    if isinstance(response, dict):
+        results = response.get("results", [])
+    elif isinstance(response, list):
+        results = response
+    else:
+        results = []
+
+    memories: list[str] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        text = result.get("memory") or result.get("text") or result.get("content")
+        if text:
+            memories.append(f"- {text}")
+
+    if not memories:
+        return ""
+
+    logger.info("[Mem0] %s memories loaded.", len(memories))
+    return "\n".join(memories)
+
+
 class _SpeechAdapter:
-    """Adapter para expor say() no agente LiveKit via sessão."""
-    def __init__(self, session):
+    def __init__(self, session: AgentSession | None):
         self._session = session
 
-    async def say(self, text: str, add_to_chat: bool = True):
+    async def say(self, text: str, add_to_chat: bool = True) -> None:
+        if not self._session:
+            return
         try:
-            logger.info(f"[SPEECH ADAPTER] Falando via LLM: {text[:50]}")
-            # Em vez de session.say (que exige TTS), usamos generate_reply 
-            # para que o Gemini Realtime fale a notificação naturalmente.
+            logger.info("[SpeechAdapter] Speaking proactive message.")
             await self._session.generate_reply(
-                instructions=f"Sua tarefa agora é apenas repassar esta notificação para o usuário de forma curta e natural: {text}",
-                add_to_chat_ctx=add_to_chat
+                instructions=(
+                    "Sua tarefa agora e apenas repassar esta notificacao para o usuario "
+                    f"de forma curta e natural: {text}"
+                ),
+                add_to_chat_ctx=add_to_chat,
             )
-        except Exception as e:
-            logger.error(f"[SPEECH ADAPTER] Erro ao falar: {e}")
+        except Exception as exc:
+            logger.error("[SpeechAdapter] Error while speaking: %s", exc)
 
-    async def speak_proactive_message(self, text: str, label: str = "", add_to_chat_ctx: bool = True):
-        pass # await self.say(text, add_to_chat=add_to_chat_ctx) # COMENTADO por estabilidade
-# ──────────────────────────────────────────────────────────────────────────────
+    async def speak_proactive_message(
+        self,
+        text: str,
+        label: str = "",
+        add_to_chat_ctx: bool = True,
+    ) -> None:
+        await self.say(text, add_to_chat=add_to_chat_ctx)
 
-
-# ─────────────────────────────────────────
-# AGENTE
-# ─────────────────────────────────────────
 
 class Assistant(Agent, llm.ToolContext):
-    def __init__(self, chat_ctx: ChatContext = None, session: AgentSession = None):
+    def __init__(self, chat_ctx: ChatContext | None = None, session: AgentSession | None = None):
         super().__init__(
             instructions=AGENT_INSTRUCTION,
             llm=google.beta.realtime.RealtimeModel(
+                model=DEFAULT_MODEL,
+                api_key=_get_google_api_key(),
                 voice="Aoede",
                 temperature=0.6,
             ),
-            chat_ctx=chat_ctx,
+            chat_ctx=chat_ctx or ChatContext(),
         )
         self.cortana_control = CortanaControl()
         self._session = session
-        
-        # Atributos de suporte para integração WhatsApp
         self._last_whatsapp_contact: str | None = None
         self._last_whatsapp_message: str | None = None
-        self._whatsapp_history: list = []
-        self._game_mode: bool = False # Estado do Modo Game
-        
-        # Controle de Proatividade (JARVIS-style)
-        self._pending_whatsapp_messages: dict[str, list[str]] = {} # contato -> lista de msgs
-        self._last_whatsapp_notif: dict[str, float] = {} # contato -> timestamp
+        self._whatsapp_history: list[dict[str, str]] = []
+        self._pending_whatsapp_messages: dict[str, list[str]] = {}
+        self._last_whatsapp_notif: dict[str, float] = {}
+        self._game_mode = False
 
     def remember_whatsapp_message(self, contact: str, text: str) -> None:
-        """Registra mensagem recebida no histórico interno."""
-        import time as _time
         entry = {
             "contact": contact,
             "text": text,
-            "at": _time.strftime("%H:%M:%S"),
+            "at": time.strftime("%H:%M:%S"),
         }
         self._whatsapp_history.append(entry)
         self._last_whatsapp_contact = contact
         self._last_whatsapp_message = text
-        # Mantém apenas as últimas 50 mensagens
         if len(self._whatsapp_history) > 50:
             self._whatsapp_history = self._whatsapp_history[-50:]
 
-    # ────────────────────────────────
-    # MÍDIA E WEB
-    # ────────────────────────────────
-
-    @agents.function_tool
-    async def pesquisar_na_web(self, consulta: str, tipo: str = "google"):
-        """Busca no Google, YouTube ou abre uma URL."""
-        try:
-            if tipo.lower() == "youtube":
-                # Abre a BUSCA no YouTube, não um vídeo aleatório
-                url = f"https://www.youtube.com/results?search_query={quote_plus(consulta)}"
-                await _abrir_chrome_com_cdp(url)
-                return f"Abrindo busca do YouTube por '{consulta}'."
-
-            elif tipo.lower() == "url":
-                await _abrir_chrome_com_cdp(consulta)
-                return f"Abrindo: {consulta}"
-
-            else: # google (padrão)
-                url = f"https://www.google.com/search?q={quote_plus(consulta)}"
-                await _abrir_chrome_com_cdp(url)
-                return f"Pesquisando '{consulta}' no Google."
-        except Exception as e:
-            return f"Erro na pesquisa: {e}"
-
-    @agents.function_tool
-    async def pausar_retomar_youtube(self):
-        """Pausa ou retoma o vídeo do YouTube no Chrome."""
-        try:
-            # Estratégia 1: Keyboard shortcut via pygetwindow (mais confiável)
-            try:
-                import pygetwindow as gw
-                import pyautogui
-                import time
-
-                # Procura janelas do Chrome que contenham "YouTube"
-                janelas_yt = [w for w in gw.getAllWindows()
-                              if "youtube" in w.title.lower() and w.visible]
-
-                if janelas_yt:
-                    janela = janelas_yt[0]
-                    janela.activate()   # traz o Chrome para frente
-                    time.sleep(0.4)     # aguarda o foco
-                    pyautogui.press("k")  # 'K' = play/pause no YouTube
-                    return "Play/Pause alternado no YouTube ✓"
-            except ImportError:
-                pass  # pygetwindow/pyautogui não instalados, tenta CDP
-
-            # Estratégia 2: CDP (só funciona se Chrome foi aberto com --remote-debugging-port)
-            if PLAYWRIGHT_DISPONIVEL and _cdp_disponivel():
-                async with async_playwright() as p:
-                    browser = await p.chromium.connect_over_cdp(CDP_URL)
-                    for ctx in browser.contexts:
-                        for page in ctx.pages:
-                            if "youtube.com/watch" in page.url:
-                                await page.evaluate(
-                                    "const v = document.querySelector('video'); if(v) { v.paused ? v.play() : v.pause(); }"
-                                )
-                                await browser.disconnect()
-                                return "Play/Pause alternado via CDP ✓"
-                    await browser.disconnect()
-                return "Nenhum vídeo do YouTube encontrado no Chrome."
-
-            return ("Não foi possível controlar o YouTube. "
-                    "Instale pygetwindow e pyautogui: pip install pygetwindow pyautogui")
-        except Exception as e:
-            return f"Erro no controle de mídia: {e}"
-
-    @agents.function_tool
-    async def fechar_programa(self, programa: str):
-        """Encerra um programa pelo nome (ex: chrome, spotify)."""
-        exe = programa if programa.lower().endswith(".exe") else f"{programa}.exe"
-        res = subprocess.run(["taskkill", "/f", "/im", exe], capture_output=True)
-        if res.returncode == 0:
-            return f"Programa '{programa}' fechado com sucesso."
-        return f"Não foi possível fechar '{programa}'. Verifique o nome do processo."
-
-    @agents.function_tool
-    async def abrir_programa(self, comando: str):
-        """Executa um comando ou abre um programa."""
-        try:
-            subprocess.Popen(comando, shell=True)
-            return f"'{comando}' aberto."
-        except Exception as e:
-            return f"Erro ao abrir '{comando}': {e}"
-
-    # ────────────────────────────────
-    # ARQUIVOS E PASTAS
-    # ────────────────────────────────
-
-    @agents.function_tool
-    async def tocar_musica(self, musica: str):
-        """Toca música, artista ou álbum no Spotify."""
-        return self.cortana_control.tocar_musica_spotify(musica)
-
-    @agents.function_tool
-    async def abrir_aplicativo(self, nome_app: str):
-        """Abre aplicativos instalados (ex: vscode, spotify)."""
-        return self.cortana_control.abrir_aplicativo(nome_app)
-
-    @agents.function_tool
-    async def criar_pasta(self, caminho: str):
-        """Cria uma pasta."""
-        return self.cortana_control.cria_pasta(caminho)
-
-    @agents.function_tool
-    async def deletar_item(self, caminho: str):
-        """Deleta um arquivo ou pasta."""
-        return self.cortana_control.deletar_arquivo(caminho)
-
-    @agents.function_tool
-    async def limpar_diretorio(self, caminho: str):
-        """Limpa uma pasta."""
-        return self.cortana_control.limpar_diretorio(caminho)
-
-    @agents.function_tool
-    async def mover_item(self, origem: str, destino: str):
-        """Move um item."""
-        return self.cortana_control.mover_item(origem, destino)
-
-    @agents.function_tool
-    async def copiar_item(self, origem: str, destino: str):
-        """Copia um item."""
-        return self.cortana_control.copiar_item(origem, destino)
-
-    @agents.function_tool
-    async def renomear_item(self, caminho: str, novo_nome: str):
-        """Renomeia um item."""
-        return self.cortana_control.renomear_item(caminho, novo_nome)
-
-    @agents.function_tool
-    async def organizar_pasta(self, caminho: str):
-        """Organiza arquivos por tipo."""
-        return self.cortana_control.organizar_pasta(caminho)
-
-    @agents.function_tool
-    async def compactar_pasta(self, caminho: str):
-        """Compacta uma pasta."""
-        return self.cortana_control.compactar_pasta(caminho)
-
-    @agents.function_tool
-    async def abrir_pasta(self, nome_pasta: str):
-        """Abre uma pasta pelo nome."""
-        return self.cortana_control.abrir_pasta(nome_pasta)
-
-    @agents.function_tool
-    async def buscar_e_abrir_arquivo(self, nome_arquivo: str):
-        """Busca e abre um arquivo."""
-        return self.cortana_control.buscar_e_abrir_arquivo(nome_arquivo)
-
-    @agents.function_tool
-    async def controle_volume(self, nivel: int):
-        """Ajusta o volume (0-100)."""
-        return self.cortana_control.controle_volume(nivel)
-
-    @agents.function_tool
-    async def controle_brilho(self, nivel: int):
-        """Ajusta o brilho (0-100)."""
-        return self.cortana_control.controle_brilho(nivel)
-
-    @agents.function_tool
-    async def energia_pc(self, acao: str):
-        """Energia: 'desligar', 'reiniciar', 'bloquear'."""
-        return self.cortana_control.energia_pc(acao)
-
-    @agents.function_tool
-    async def wake_on_lan(self, mac_address: str):
-        """Envia um pacote Wake-on-LAN para ligar um dispositivo (PC, TV)."""
-        return self.cortana_control.wake_on_lan(mac_address)
-
-    @agents.function_tool
-    async def controle_tv_lg(self, ip: str, acao: str):
-        """Controla Smart TVs LG (WebOS). Ações: 'desligar', 'mute', 'unmute'."""
-        return self.cortana_control.controle_tv_lg(ip, acao)
-
-    @agents.function_tool
-    async def controle_tv_samsung(self, ip: str, acao: str):
-        """Controla Smart TVs Samsung (Tizen). Ações: 'desligar', 'volume_up', 'volume_down'."""
-        return self.cortana_control.controle_tv_samsung(ip, acao)
-
-    @agents.function_tool
-    async def controle_dispositivo_broadlink(self, ip: str, acao: str):
-        """Controla dispositivos via Broadlink (Ar Condicionado, etc). Ações: 'aprender'."""
-        return self.cortana_control.controle_dispositivo_broadlink(ip, acao)
-
-    @agents.function_tool
-    async def controle_tv_tcl(self, ip: str, acao: str):
-        """Controla Smart TVs TCL (Android TV) via protocolo V2 (PIN). Ações: 'ligar', 'desligar', 'confirmar', 'home', 'vol_up', 'vol_down'."""
-        return await self.cortana_control.controle_tv_tcl(ip, acao)
-
-    # ────────────────────────────────
-    # WHATSAPP (Voz e Proativo)
-    # ────────────────────────────────
-
-    @agents.function_tool
-    async def conectar_whatsapp(self) -> str:
-        """Inicia conexão com o WhatsApp (gera QR Code)."""
-        logger.info("[WPP TOOL] Iniciando conexão...")
-        if not self._session:
-            return "Erro: Sessão não inicializada."
-        speech_adapter = _SpeechAdapter(self._session)
-        success, message = await _wpp_bridge.connect_whatsapp(self, speech_adapter)
-        return message
-
-    @agents.function_tool
-    async def enviar_whatsapp(self, contato: str, mensagem: str) -> str:
-        """Envia mensagem de texto para um contato."""
-        if not await _wpp_bridge.is_whatsapp_connected_async():
-            return "WhatsApp desconectado. Diga 'conecta meu whatsapp'."
-        logger.info(f"[WPP TOOL] Enviando para {contato}...")
-        result = await send_whatsapp_message(contato, mensagem)
-        return "Enviado!" if result.get("success") else f"Erro: {result.get('message')}"
-
-    @agents.function_tool
-    async def status_whatsapp(self) -> str:
-        """Verifica se o WhatsApp está conectado."""
-        if await _wpp_bridge.is_whatsapp_connected_async():
-            res = await get_whatsapp_status()
-            return "Conectado" if res.get("connected") else "Offline"
-        return "Não conectado"
-
-    @agents.function_tool
-    async def aprender_fato(self, fato: str) -> str:
-        """Salva preferências ou fatos novos sobre o usuário na memória de longo prazo."""
-        try:
-            mem0_client = AsyncMemoryClient()
-            user_id = "Guilherme"
-            await mem0_client.add([{"role": "user", "content": fato}], user_id=user_id)
-            logger.info(f"[MEM0] Fato aprendido: {fato}")
-            return f"Fato memorizado: '{fato}'"
-        except Exception as e:
-            return f"Erro ao memorizar fato: {e}"
-
-    @agents.function_tool
-    async def pesquisar_no_passado(self, termo: str) -> str:
-        """Busca palavras-chave em conversas passadas guardadas localmente."""
-        try:
-            arquivos = glob.glob("memory/episodic/*.json")
-            if not arquivos:
-                return "Ainda não tenho registros no meu histórico local."
-            
-            resumos = []
-            # Ordena por mais recente
-            arquivos.sort(reverse=True)
-            
-            for arq in arquivos[:10]: # Limita aos últimos 10 logs de sessão
-                with open(arq, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    # Busca simples por palavra-chave
-                    if termo.lower() in str(data).lower():
-                        msgs = data.get("messages", [])
-                        # Pega o trecho relevante (aprox 3 mensagens ao redor)
-                        for i, m in enumerate(msgs):
-                            if termo.lower() in m.get("content", "").lower():
-                                context = msgs[max(0, i-1):min(len(msgs), i+2)]
-                    await browser.disconnect()
-                return "Nenhum vídeo do YouTube encontrado no Chrome."
-
-            return ("Não foi possível controlar o YouTube. "
-                    "Instale pygetwindow e pyautogui: pip install pygetwindow pyautogui")
-        except Exception as e:
-            return f"Erro no controle de mídia: {e}"
-
-    @agents.function_tool
-    async def fechar_programa(self, programa: str):
-        """Encerra um programa pelo nome (ex: chrome, spotify)."""
-        exe = programa if programa.lower().endswith(".exe") else f"{programa}.exe"
-        res = subprocess.run(["taskkill", "/f", "/im", exe], capture_output=True)
-        if res.returncode == 0:
-            return f"Programa '{programa}' fechado com sucesso."
-        return f"Não foi possível fechar '{programa}'. Verifique o nome do processo."
-
-    @agents.function_tool
-    async def abrir_programa(self, comando: str):
-        """Executa um comando ou abre um programa."""
-        try:
-            subprocess.Popen(comando, shell=True)
-            return f"'{comando}' aberto."
-        except Exception as e:
-            return f"Erro ao abrir '{comando}': {e}"
-
-    # ────────────────────────────────
-    # ARQUIVOS E PASTAS
-    # ────────────────────────────────
-
-    @agents.function_tool
-    async def tocar_musica(self, musica: str):
-        """Toca música, artista ou álbum no Spotify."""
-        return self.cortana_control.tocar_musica_spotify(musica)
-
-    @agents.function_tool
-    async def abrir_aplicativo(self, nome_app: str):
-        """Abre aplicativos instalados (ex: vscode, spotify)."""
-        return self.cortana_control.abrir_aplicativo(nome_app)
-
-    @agents.function_tool
-    async def criar_pasta(self, caminho: str):
-        """Cria uma pasta."""
-        return self.cortana_control.cria_pasta(caminho)
-
-    @agents.function_tool
-    async def deletar_item(self, caminho: str):
-        """Deleta um arquivo ou pasta."""
-        return self.cortana_control.deletar_arquivo(caminho)
-
-    @agents.function_tool
-    async def limpar_diretorio(self, caminho: str):
-        """Limpa uma pasta."""
-        return self.cortana_control.limpar_diretorio(caminho)
-
-    @agents.function_tool
-    async def mover_item(self, origem: str, destino: str):
-        """Move um item."""
-        return self.cortana_control.mover_item(origem, destino)
-
-    @agents.function_tool
-    async def copiar_item(self, origem: str, destino: str):
-        """Copia um item."""
-        return self.cortana_control.copiar_item(origem, destino)
-
-    @agents.function_tool
-    async def renomear_item(self, caminho: str, novo_nome: str):
-        """Renomeia um item."""
-        return self.cortana_control.renomear_item(caminho, novo_nome)
-
-    @agents.function_tool
-    async def organizar_pasta(self, caminho: str):
-        """Organiza arquivos por tipo."""
-        return self.cortana_control.organizar_pasta(caminho)
-
-    @agents.function_tool
-    async def compactar_pasta(self, caminho: str):
-        """Compacta uma pasta."""
-        return self.cortana_control.compactar_pasta(caminho)
-
-    @agents.function_tool
-    async def abrir_pasta(self, nome_pasta: str):
-        """Abre uma pasta pelo nome."""
-        return self.cortana_control.abrir_pasta(nome_pasta)
-
-    @agents.function_tool
-    async def buscar_e_abrir_arquivo(self, nome_arquivo: str):
-        """Busca e abre um arquivo."""
-        return self.cortana_control.buscar_e_abrir_arquivo(nome_arquivo)
-
-    @agents.function_tool
-    async def controle_volume(self, nivel: int):
-        """Ajusta o volume (0-100)."""
-        return self.cortana_control.controle_volume(nivel)
-
-    @agents.function_tool
-    async def controle_brilho(self, nivel: int):
-        """Ajusta o brilho (0-100)."""
-        return self.cortana_control.controle_brilho(nivel)
-
-    @agents.function_tool
-    async def energia_pc(self, acao: str):
-        """Energia: 'desligar', 'reiniciar', 'bloquear'."""
-        return self.cortana_control.energia_pc(acao)
-
-    @agents.function_tool
-    async def wake_on_lan(self, mac_address: str):
-        """Envia um pacote Wake-on-LAN para ligar um dispositivo (PC, TV)."""
-        return self.cortana_control.wake_on_lan(mac_address)
-
-    @agents.function_tool
-    async def controle_tv_lg(self, ip: str, acao: str):
-        """Controla Smart TVs LG (WebOS). Ações: 'desligar', 'mute', 'unmute'."""
-        return self.cortana_control.controle_tv_lg(ip, acao)
-
-    @agents.function_tool
-    async def controle_tv_samsung(self, ip: str, acao: str):
-        """Controla Smart TVs Samsung (Tizen). Ações: 'desligar', 'volume_up', 'volume_down'."""
-        return self.cortana_control.controle_tv_samsung(ip, acao)
-
-    @agents.function_tool
-    async def controle_dispositivo_broadlink(self, ip: str, acao: str):
-        """Controla dispositivos via Broadlink (Ar Condicionado, etc). Ações: 'aprender'."""
-        return self.cortana_control.controle_dispositivo_broadlink(ip, acao)
-
-    @agents.function_tool
-    async def controle_tv_tcl(self, ip: str, acao: str):
-        """Controla Smart TVs TCL (Android TV) via protocolo V2 (PIN). Ações: 'ligar', 'desligar', 'confirmar', 'home', 'vol_up', 'vol_down'."""
-        return await self.cortana_control.controle_tv_tcl(ip, acao)
-
-    # ── Lógica de Notificações Inteligentes ───────────────────
-    
-    async def handle_whatsapp_notif(self, contact: str, text: str):
-        """Decide se deve interromper o usuário por voz ou apenas acumular a mensagem."""
+    async def handle_whatsapp_notif(self, contact: str, text: str) -> None:
         now = time.time()
         last_time = self._last_whatsapp_notif.get(contact, 0)
-        
-        # Registra no histórico geral
-        self.remember_whatsapp_message(contact, text)
-        
-        # Adiciona à fila de pendentes para resumo posterior
-        if contact not in self._pending_whatsapp_messages:
-            self._pending_whatsapp_messages[contact] = []
-        self._pending_whatsapp_messages[contact].append(text)
-        
-        # Lógica de Interrupção (Rate Limiting de 3 minutos)
-        if (now - last_time) > 180: # 3 minutos
-            self._last_whatsapp_notif[contact] = now
-            prompt_msg = f"Chefe, o {contact} mandou uma mensagem: {text}. Quer responder?"
-            
-            # Chama o adaptador de fala (que deve estar habilitado)
-            speech = _SpeechAdapter(self._session)
-            await speech.say(prompt_msg)
-            logger.info(f"[NOTIF] Usuário notificado via voz de {contact}")
-        else:
-            logger.info(f"[NOTIF] Mensagem de {contact} acumulada silenciosamente.")
 
-    # ────────────────────────────────
-    # WHATSAPP (Voz e Proativo)
-    # ────────────────────────────────
+        self.remember_whatsapp_message(contact, text)
+        self._pending_whatsapp_messages.setdefault(contact, []).append(text)
+
+        if (now - last_time) <= 180:
+            logger.info("[WhatsApp] Silent accumulation for %s.", contact)
+            return
+
+        self._last_whatsapp_notif[contact] = now
+        speech = _SpeechAdapter(self._session)
+        await speech.say(f"Chefe, o {contact} mandou uma mensagem: {text}. Quer responder?")
+
+    @agents.function_tool
+    async def pesquisar_na_web(self, consulta: str, tipo: str = "google") -> str:
+        try:
+            search_type = tipo.lower().strip()
+            if search_type == "youtube":
+                url = f"https://www.youtube.com/results?search_query={quote_plus(consulta)}"
+                await _open_chrome_with_cdp(url)
+                return f"Abrindo busca do YouTube por '{consulta}'."
+            if search_type == "url":
+                await _open_chrome_with_cdp(consulta)
+                return f"Abrindo: {consulta}"
+
+            url = f"https://www.google.com/search?q={quote_plus(consulta)}"
+            await _open_chrome_with_cdp(url)
+            return f"Pesquisando '{consulta}' no Google."
+        except Exception as exc:
+            return f"Erro na pesquisa: {exc}"
+
+    @agents.function_tool
+    async def pausar_retomar_youtube(self) -> str:
+        try:
+            try:
+                import pyautogui
+                import pygetwindow as gw
+
+                youtube_windows = [
+                    window
+                    for window in gw.getAllWindows()
+                    if window.visible and "youtube" in window.title.lower()
+                ]
+                if youtube_windows:
+                    youtube_windows[0].activate()
+                    time.sleep(0.4)
+                    pyautogui.press("k")
+                    return "Play/pause alternado no YouTube."
+            except ImportError:
+                pass
+
+            if PLAYWRIGHT_AVAILABLE and _cdp_available():
+                async with async_playwright() as playwright:
+                    browser = await playwright.chromium.connect_over_cdp(CDP_URL)
+                    for context in browser.contexts:
+                        for page in context.pages:
+                            if "youtube.com/watch" not in page.url:
+                                continue
+                            await page.evaluate(
+                                "const video = document.querySelector('video');"
+                                "if (video) { video.paused ? video.play() : video.pause(); }"
+                            )
+                            await browser.disconnect()
+                            return "Play/pause alternado via CDP."
+                    await browser.disconnect()
+                return "Nenhum video do YouTube foi encontrado no Chrome."
+
+            return (
+                "Nao foi possivel controlar o YouTube. "
+                "Instale pygetwindow e pyautogui para habilitar o atalho de teclado."
+            )
+        except Exception as exc:
+            return f"Erro no controle de midia: {exc}"
+
+    @agents.function_tool
+    async def fechar_programa(self, programa: str) -> str:
+        cleaned = programa.strip()
+        if not cleaned or any(char in cleaned for char in "&|;<>"):
+            return "Nome de processo invalido."
+
+        executable = cleaned if cleaned.lower().endswith(".exe") else f"{cleaned}.exe"
+        result = subprocess.run(["taskkill", "/f", "/im", executable], capture_output=True, text=True)
+        if result.returncode == 0:
+            return f"Programa '{cleaned}' fechado com sucesso."
+        return f"Nao foi possivel fechar '{cleaned}'. Verifique o nome do processo."
+
+    @agents.function_tool
+    async def abrir_programa(self, comando: str) -> str:
+        cleaned = comando.strip()
+        if not cleaned:
+            return "Comando vazio."
+        if _command_is_blocked(cleaned):
+            return "Comando bloqueado por seguranca. Use abrir_aplicativo ou uma instrucao mais especifica."
+
+        expanded = os.path.expandvars(os.path.expanduser(cleaned))
+        try:
+            if expanded.startswith(("http://", "https://")) or os.path.exists(expanded):
+                os.startfile(expanded)
+                return f"Abrindo '{cleaned}'."
+        except OSError:
+            pass
+
+        try:
+            args = shlex.split(cleaned, posix=False)
+            if not args:
+                return "Nao consegui interpretar o comando informado."
+            subprocess.Popen(args, shell=False)
+            return f"'{cleaned}' aberto."
+        except Exception as exc:
+            return f"Erro ao abrir '{cleaned}': {exc}"
+
+    @agents.function_tool
+    async def tocar_musica(self, musica: str) -> str:
+        return self.cortana_control.tocar_musica_spotify(musica)
+
+    @agents.function_tool
+    async def abrir_aplicativo(self, nome_app: str) -> str:
+        return self.cortana_control.abrir_aplicativo(nome_app)
+
+    @agents.function_tool
+    async def criar_pasta(self, caminho: str) -> str:
+        return self.cortana_control.cria_pasta(caminho)
+
+    @agents.function_tool
+    async def deletar_item(self, caminho: str) -> str:
+        return self.cortana_control.deletar_arquivo(caminho)
+
+    @agents.function_tool
+    async def limpar_diretorio(self, caminho: str) -> str:
+        return self.cortana_control.limpar_diretorio(caminho)
+
+    @agents.function_tool
+    async def mover_item(self, origem: str, destino: str) -> str:
+        return self.cortana_control.mover_item(origem, destino)
+
+    @agents.function_tool
+    async def copiar_item(self, origem: str, destino: str) -> str:
+        return self.cortana_control.copiar_item(origem, destino)
+
+    @agents.function_tool
+    async def renomear_item(self, caminho: str, novo_nome: str) -> str:
+        return self.cortana_control.renomear_item(caminho, novo_nome)
+
+    @agents.function_tool
+    async def organizar_pasta(self, caminho: str) -> str:
+        return self.cortana_control.organizar_pasta(caminho)
+
+    @agents.function_tool
+    async def compactar_pasta(self, caminho: str) -> str:
+        return self.cortana_control.compactar_pasta(caminho)
+
+    @agents.function_tool
+    async def abrir_pasta(self, nome_pasta: str) -> str:
+        return self.cortana_control.abrir_pasta(nome_pasta)
+
+    @agents.function_tool
+    async def buscar_e_abrir_arquivo(self, nome_arquivo: str) -> str:
+        return self.cortana_control.buscar_e_abrir_arquivo(nome_arquivo)
+
+    @agents.function_tool
+    async def controle_volume(self, nivel: int) -> str:
+        return self.cortana_control.controle_volume(nivel)
+
+    @agents.function_tool
+    async def controle_brilho(self, nivel: int) -> str:
+        return self.cortana_control.controle_brilho(nivel)
+
+    @agents.function_tool
+    async def energia_pc(self, acao: str) -> str:
+        return self.cortana_control.energia_pc(acao)
+
+    @agents.function_tool
+    async def wake_on_lan(self, mac_address: str) -> str:
+        return self.cortana_control.wake_on_lan(mac_address)
+
+    @agents.function_tool
+    async def controle_tv_lg(self, ip: str, acao: str) -> str:
+        return self.cortana_control.controle_tv_lg(ip, acao)
+
+    @agents.function_tool
+    async def controle_tv_samsung(self, ip: str, acao: str) -> str:
+        return self.cortana_control.controle_tv_samsung(ip, acao)
+
+    @agents.function_tool
+    async def controle_dispositivo_broadlink(self, ip: str, acao: str) -> str:
+        return self.cortana_control.controle_dispositivo_broadlink(ip, acao)
+
+    @agents.function_tool
+    async def controle_tv_tcl(self, ip: str, acao: str) -> str:
+        return await self.cortana_control.controle_tv_tcl(ip, acao)
 
     @agents.function_tool
     async def conectar_whatsapp(self) -> str:
-        """Inicia conexão com o WhatsApp (gera QR Code)."""
-        logger.info("[WPP TOOL] Iniciando conexão...")
         if not self._session:
-            return "Erro: Sessão não inicializada."
+            return "Erro: sessao do agente nao foi inicializada."
+        logger.info("[WhatsApp] Starting connection flow.")
         speech_adapter = _SpeechAdapter(self._session)
-        success, message = await _wpp_bridge.connect_whatsapp(self, speech_adapter)
-        return message
+        success, message = await whatsapp_bridge.connect_whatsapp(self, speech_adapter)
+        return message if success else message
 
     @agents.function_tool
     async def enviar_whatsapp(self, contato: str, mensagem: str) -> str:
-        """Envia mensagem de texto para um contato."""
-        if not await _wpp_bridge.is_whatsapp_connected_async():
+        if not await whatsapp_bridge.is_whatsapp_connected_async():
             return "WhatsApp desconectado. Diga 'conecta meu whatsapp'."
-        logger.info(f"[WPP TOOL] Enviando para {contato}...")
         result = await send_whatsapp_message(contato, mensagem)
         return "Enviado!" if result.get("success") else f"Erro: {result.get('message')}"
 
     @agents.function_tool
     async def status_whatsapp(self) -> str:
-        """Verifica se o WhatsApp está conectado."""
-        if await _wpp_bridge.is_whatsapp_connected_async():
-            res = await get_whatsapp_status()
-            return "Conectado" if res.get("connected") else "Offline"
-        return "Não conectado"
+        if not await whatsapp_bridge.is_whatsapp_connected_async():
+            return "Nao conectado"
+        response = await get_whatsapp_status()
+        return "Conectado" if response.get("connected") else "Offline"
 
     @agents.function_tool
     async def aprender_fato(self, fato: str) -> str:
-        """Salva preferências ou fatos novos sobre o usuário na memória de longo prazo."""
+        if not fato.strip():
+            return "Nada para memorizar."
         try:
             mem0_client = AsyncMemoryClient()
-            user_id = "Guilherme"
-            await mem0_client.add([{"role": "user", "content": fato}], user_id=user_id)
-            logger.info(f"[MEM0] Fato aprendido: {fato}")
+            await mem0_client.add([{"role": "user", "content": fato}], user_id=DEFAULT_USER_ID)
+            logger.info("[Mem0] Learned new fact for %s.", DEFAULT_USER_ID)
             return f"Fato memorizado: '{fato}'"
-        except Exception as e:
-            return f"Erro ao memorizar fato: {e}"
+        except Exception as exc:
+            return f"Erro ao memorizar fato: {exc}"
 
     @agents.function_tool
     async def pesquisar_no_passado(self, termo: str) -> str:
-        """Busca palavras-chave em conversas passadas guardadas localmente."""
         try:
-            arquivos = glob.glob("memory/episodic/*.json")
-            if not arquivos:
-                return "Ainda não tenho registros no meu histórico local."
-            
-            resumos = []
-            # Ordena por mais recente
-            arquivos.sort(reverse=True)
-            
-            for arq in arquivos[:10]: # Limita aos últimos 10 logs de sessão
-                with open(arq, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    # Busca simples por palavra-chave
-                    if termo.lower() in str(data).lower():
-                        msgs = data.get("messages", [])
-                        # Pega o trecho relevante (aprox 3 mensagens ao redor)
-                        for i, m in enumerate(msgs):
-                            if termo.lower() in m.get("content", "").lower():
-                                context = msgs[max(0, i-1):min(len(msgs), i+2)]
-                                snippets = [f"[{m.get('role')}]: {m.get('content')}" for m in context]
-                                resumos.append(f"Em {data.get('timestamp')}:\n" + "\n".join(snippets))
-                                break
-            
-            if not resumos:
-                return f"Não encontrei registros de '{termo}' nas minhas conversas passadas."
-            
-            return "--- REGISTROS ENCONTRADOS ---\n\n" + "\n\n---\n\n".join(resumos)
-        except Exception as e:
-            return f"Erro na pesquisa local: {e}"
+            files = sorted(EPISODIC_MEMORY_DIR.glob("session_*.json"), reverse=True)
+            if not files:
+                return "Ainda nao tenho registros no meu historico local."
+
+            matches: list[str] = []
+            search_term = termo.lower()
+            for file_path in files[:10]:
+                with file_path.open("r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+
+                messages = data.get("messages", [])
+                for index, message in enumerate(messages):
+                    content = str(message.get("content", ""))
+                    if search_term not in content.lower():
+                        continue
+
+                    context = messages[max(0, index - 1) : min(len(messages), index + 2)]
+                    snippets = [
+                        f"[{item.get('role', 'unknown')}]: {item.get('content', '')}"
+                        for item in context
+                    ]
+                    matches.append(f"Em {data.get('timestamp', file_path.stem)}:\n" + "\n".join(snippets))
+                    break
+
+            if not matches:
+                return f"Nao encontrei registros de '{termo}' nas minhas conversas passadas."
+
+            return "--- REGISTROS ENCONTRADOS ---\n\n" + "\n\n---\n\n".join(matches)
+        except Exception as exc:
+            return f"Erro na pesquisa local: {exc}"
 
     @agents.function_tool
     async def modo_game(self, ativar: bool) -> str:
-        """Ativa ou desativa o Modo Game (reduz uso de CPU/GPU)."""
         self._game_mode = ativar
-        logger.info(f"[MODE] Modo Game {'ATIVADO' if ativar else 'DESATIVADO'}")
-        
-        # Avisa o frontend via Data Channel
         try:
-            msg = {"type": "game_mode", "active": ativar}
-            await self._session.room.local_participant.publish_data(
-                json.dumps(msg).encode('utf-8')
-            )
-        except Exception as e:
-            logger.error(f"[MODE] Erro ao avisar frontend: {e}")
-            
-        res = "Modo Game ativado. Vou economizar recursos agora, Chefe." if ativar else "Modo Game desativado. Voltando ao poder total."
-        return res
+            await _publish_room_data(self._session, {"type": "game_mode", "active": ativar})
+        except Exception as exc:
+            logger.error("[Mode] Failed to notify frontend: %s", exc)
+        return (
+            "Modo Game ativado. Vou economizar recursos agora, chefe."
+            if ativar
+            else "Modo Game desativado. Voltando ao poder total."
+        )
 
     @agents.function_tool
-    async def resumo_whatsapp(self, contato: str = None) -> str:
-        """Resume as mensagens pendentes (não lidas) de um contato específico ou de todos."""
+    async def resumo_whatsapp(self, contato: str | None = None) -> str:
         if not self._pending_whatsapp_messages:
-            return "Não há mensagens pendentes para resumir, Chefe."
-        
+            return "Nao ha mensagens pendentes para resumir, chefe."
+
         target_contacts = [contato] if contato else list(self._pending_whatsapp_messages.keys())
-        full_report = []
-        
-        for c in target_contacts:
-            messages = self._pending_whatsapp_messages.get(c, [])
-            if not messages: continue
-            
-            # Usa o próprio LLM para gerar um resumo curto
-            combined_text = "\n".join(messages)
-            try:
-                # Limpa a fila após preparar para o resumo
-                self._pending_whatsapp_messages[c] = []
-                
-                # Pedimos um resumo via generate_reply (ou apenas retornamos o texto para o LLM processar no contexto da tool)
-                # Como é uma tool, o retorno será visto pelo LLM que chamou a tool.
-                full_report.append(f"Mensagens de {c}:\n{combined_text}")
-            except Exception as e:
-                logger.error(f"[RESUMO] Erro em {c}: {e}")
-        
-        if not full_report:
+        report: list[str] = []
+        for current_contact in target_contacts:
+            messages = self._pending_whatsapp_messages.get(current_contact, [])
+            if not messages:
+                continue
+            self._pending_whatsapp_messages[current_contact] = []
+            report.append(f"Mensagens de {current_contact}:\n" + "\n".join(messages))
+
+        if not report:
             return "Nenhuma mensagem encontrada para os contatos informados."
-            
-        return "Aqui estão as mensagens que acumulei:\n\n" + "\n---\n".join(full_report)
+        return "Aqui estao as mensagens que acumulei:\n\n" + "\n---\n".join(report)
 
     @agents.function_tool
     async def desconectar_whatsapp(self) -> str:
-        """Encerra o bridge do WhatsApp."""
-        await _wpp_bridge.disconnect_whatsapp()
+        await whatsapp_bridge.disconnect_whatsapp()
         return "WhatsApp desconectado."
 
 
-# ─────────────────────────────────────────
-# ENTRYPOINT
-# ─────────────────────────────────────────
-
-async def entrypoint(ctx: agents.JobContext):
-
+async def entrypoint(ctx: agents.JobContext) -> None:
+    user_id = DEFAULT_USER_ID
     mem0_client = AsyncMemoryClient()
-    user_id = "Guilherme"
+    initial_ctx = ChatContext()
+    memory_block = await _load_user_memories(mem0_client, user_id)
+    if memory_block:
+        initial_ctx.add_message(
+            role="assistant",
+            content=(
+                f"O usuario se chama {user_id}. Use estas memorias como contexto quando forem relevantes:\n"
+                f"{memory_block}"
+            ),
+        )
 
     await ctx.connect()
 
     session = AgentSession()
-    agent = Assistant(chat_ctx=ChatContext(), session=session)
-
+    agent = Assistant(chat_ctx=initial_ctx, session=session)
     await session.start(
         room=ctx.room,
         agent=agent,
         room_input_options=RoomInputOptions(
             video_enabled=True,
-            # RNNoise é menos agressivo que BVC e ajuda a evitar cortes na voz 
-            # se o microfone não for de alta sensibilidade.
-            noise_cancellation=noise_cancellation.NC(), 
+            noise_cancellation=noise_cancellation.NC(),
         ),
     )
 
-    # ── Carregar Memória de Longo Prazo ─────────────────
-    # NOTA: Na API v2 do Mem0, user_id vai dentro de 'filters'
-    memoria_str = ""
-    try:
-        logger.info(f"[Mem0] Carregando memórias para '{user_id}'...")
-        response = await mem0_client.search(
-            query="histórico, preferências e informações pessoais do usuário",
-            filters={"user_id": user_id},
-            limit=5,
-        )
-        # O retorno da v2 pode ser dict com "results" ou lista direta
-        if isinstance(response, dict):
-            results = response.get("results", [])
-        elif isinstance(response, list):
-            results = response
-        else:
-            results = []
+    last_saved_payload: str | None = None
+    last_synced_payload: str | None = None
 
-        logger.info(f"[Mem0] {len(results)} memórias encontradas.")
-
-        if results:
-            memorias = []
-            for r in results:
-                texto = None
-                if isinstance(r, dict):
-                    texto = r.get("memory") or r.get("text") or r.get("content")
-                if texto:
-                    memorias.append(f"- {texto}")
-
-            if memorias:
-                bloco = "\n".join(memorias)
-                memoria_str = f"\n\n[MEMÓRIAS DO USUÁRIO]\n{bloco}"
-                logger.info(f"[Mem0] {len(memorias)} memórias carregadas com sucesso.")
-    except Exception as e:
-        logger.error(f"[Mem0] Erro ao carregar memória: {e}")
-
-    # ── Salvar Memória ao Desligar ───────────────────────
-    async def save_session_memory():
-        """Gera um log detalhado da sessão para a memória episódica."""
-        msgs = []
-        for item in session._agent.chat_ctx.items:
-            if not hasattr(item, "content") or not item.content:
+    def _session_messages() -> list[dict[str, str]]:
+        messages: list[dict[str, str]] = []
+        for item in agent.chat_ctx.items:
+            role = getattr(item, "role", None)
+            if role not in ("user", "assistant"):
                 continue
-            if item.role not in ("user", "assistant"):
-                continue
-            conteudo = "".join(item.content) if isinstance(item.content, list) else str(item.content)
-            msgs.append({"role": item.role, "content": conteudo.strip()})
-        
-        if msgs:
-            ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            data = {
-                "timestamp": ts,
-                "messages": msgs
-            }
-            path = f"memory/episodic/session_{ts}.json"
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"[EPISODIC] Sessão salva em {path}")
+            content = _chat_item_to_text(item)
+            if content:
+                messages.append({"role": role, "content": content})
+        return messages
 
-            # Sincroniza com Mem0
+    async def save_session_memory(sync_mem0: bool = False) -> None:
+        nonlocal last_saved_payload, last_synced_payload
+
+        messages = _session_messages()
+        if not messages:
+            return
+
+        payload = json.dumps(messages, ensure_ascii=False)
+        if payload != last_saved_payload:
+            _ensure_episodic_dir()
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            file_path = EPISODIC_MEMORY_DIR / f"session_{timestamp}.json"
+            with file_path.open("w", encoding="utf-8") as handle:
+                json.dump({"timestamp": timestamp, "messages": messages}, handle, ensure_ascii=False, indent=2)
+            logger.info("[Episodic] Session saved to %s", file_path)
+            last_saved_payload = payload
+
+        if sync_mem0 and payload != last_synced_payload:
             try:
-                await mem0_client.add(msgs, user_id=user_id)
-                logger.info(f"[Mem0] {len(msgs)} mensagens sincronizadas.")
-            except Exception as e:
-                logger.warning(f"[Mem0] Erro ao sincronizar: {e}")
+                await mem0_client.add(messages, user_id=user_id)
+                last_synced_payload = payload
+                logger.info("[Mem0] %s messages synchronized.", len(messages))
+            except Exception as exc:
+                logger.warning("[Mem0] Synchronization failed: %s", exc)
 
-    async def shutdown_hook():
-        # Encerrar WhatsApp ao fechar o agente
-        logger.info("[SHUTDOWN] Encerrando bridge do WhatsApp...")
-        _wpp_bridge.stop_monitor()
-        _wpp_bridge.stop_bridge_process()
-        
-        # Parar tarefas em background
-        metrics_task.cancel()
-        auto_save_task.cancel()
-        
-        # Salvar memória final
-        await save_session_memory()
-
-        try:
-            await metrics_task
-            await auto_save_task
-        except asyncio.CancelledError:
-            pass
-
-    ctx.add_shutdown_callback(shutdown_hook)
-
-    # ── Métrica do Sistema (HUD) ────────────────────────
-    async def metrics_publisher():
+    async def metrics_publisher() -> None:
         while True:
             try:
-                # Se estiver em modo game, envia a cada 10s. Senão, a cada 2s.
                 sleep_time = 10 if agent._game_mode else 2
-                
                 metrics = {
                     "type": "metrics",
                     "data": {
                         "cpu": psutil.cpu_percent(),
                         "ram": psutil.virtual_memory().percent,
-                        "disk": psutil.disk_usage('C:\\').percent,
-                        "gpu": 0
-                    }
+                        "disk": psutil.disk_usage("C:\\").percent,
+                        "gpu": 0,
+                    },
                 }
-                await ctx.room.local_participant.publish_data(
-                    json.dumps(metrics).encode('utf-8')
-                )
-            except Exception as e:
-                logger.error(f"[METRICS] Erro ao publicar: {e}")
-            
-            # Reconhece mudança de modo mais rápido que o sleep total
+                await ctx.room.local_participant.publish_data(json.dumps(metrics).encode("utf-8"))
+            except Exception as exc:
+                logger.error("[Metrics] Failed to publish metrics: %s", exc)
+
             for _ in range(sleep_time):
                 await asyncio.sleep(1)
-                if agent._game_mode != (sleep_time == 10): break
+                if agent._game_mode != (sleep_time == 10):
+                    break
 
-    # Inicia a tarefa de métricas em background
-    metrics_task = asyncio.create_task(metrics_publisher())
-
-    # ── Auto-Save Periódico (5 min) ───────────────────
-    async def periodic_autosave():
+    async def periodic_autosave() -> None:
         while True:
-            await asyncio.sleep(300) # 5 minutos
-            await save_session_memory()
-            logger.info("[AUTO-SAVE] Histórico atualizado com sucesso.")
+            await asyncio.sleep(300)
+            await save_session_memory(sync_mem0=False)
+            logger.info("[AutoSave] Episodic memory updated.")
 
+    metrics_task = asyncio.create_task(metrics_publisher())
     auto_save_task = asyncio.create_task(periodic_autosave())
+
+    async def shutdown_hook() -> None:
+        logger.info("[Shutdown] Stopping background integrations.")
+        whatsapp_bridge.stop_monitor()
+        whatsapp_bridge.stop_bridge_process()
+
+        for task in (metrics_task, auto_save_task):
+            task.cancel()
+
+        await save_session_memory(sync_mem0=True)
+
+        for task in (metrics_task, auto_save_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    ctx.add_shutdown_callback(shutdown_hook)
 
     try:
         await session.generate_reply(
-            instructions=SESSION_INSTRUCTION + "\nUse uma das saudações curtas sugeridas (estilo JARVIS)." + memoria_str
+            instructions=SESSION_INSTRUCTION + "\nUse uma saudacao curta no estilo JARVIS."
         )
-    except Exception as e:
-        logger.warning(f"[ENTRYPOINT] Falha ao gerar resposta inicial (provável desconexão): {e}")
+    except Exception as exc:
+        logger.warning("[Entrypoint] Failed to generate initial reply: %s", exc)
 
 
 if __name__ == "__main__":
