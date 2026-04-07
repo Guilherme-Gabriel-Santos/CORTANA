@@ -1,0 +1,12 @@
+api keys.txt
+*.log
+__pycache__/
+node_modules/
+.env
+.venv/
+venv/
+*.pyc
+kira_session/
+whatsapp_api_node/node_modules/
+kira-v3/__pycache__/
+Aula automacao/Controle_PC/whatsapp_api_node/node_modules/
