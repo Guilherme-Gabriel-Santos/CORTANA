@@ -1,0 +1,11 @@
+openai
+faster-whisper
+sounddevice
+soundfile
+numpy
+pyttsx3
+python-dotenv
+requests
+PySide6
+edge-tts
+pygame
