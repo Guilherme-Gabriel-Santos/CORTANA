@@ -649,6 +649,7 @@ class OfflineToolbox:
             self._schema("status_face_id", "Consulta o status atual do Face ID local.", {}),
             self._schema("perfil_face_id", "Resume o perfil facial aprendido localmente.", {}),
             self._schema("modo_game", "Liga ou desliga o modo de economia local.", {"ativar": "true para ativar, false para desativar."}, ["ativar"]),
+            self._schema("tarefa_complexa_avancada", "[USO RESTRITO] Repassa instrução complexa para o Cérebro Auxiliar (Open Interpreter) criar/rodar scripts locais.", {"instrucao": "A instrução clara a ser passada."}),
         ]
 
     def _schema(
@@ -817,6 +818,32 @@ class OfflineToolbox:
     def modo_game(self, ativar: bool) -> str:
         self._game_mode = bool(ativar)
         return "Modo Game ativado localmente." if self._game_mode else "Modo Game desativado localmente."
+
+    def tarefa_complexa_avancada(self, instrucao: str) -> str:
+        if self.face_auth and self.face_auth.enabled and not self.face_auth.snapshot().authenticated:
+            return "Face ID bloqueado. A Cortana so responde apos reconhecer o rosto autorizado."
+        try:
+            from interpreter import interpreter
+            interpreter.auto_run = True
+            
+            google_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            if google_key and not os.getenv("INTERPRETER_MODEL", "").startswith("ollama/"):
+                interpreter.llm.model = os.getenv("INTERPRETER_MODEL", "gemini/gemini-2.5-flash")
+                interpreter.llm.api_key = google_key
+            else:
+                interpreter.llm.model = os.getenv("INTERPRETER_MODEL", "ollama/llama3")
+                
+            interpreter.llm.max_tokens = 2048
+            
+            results = interpreter.chat(instrucao)
+            if results and isinstance(results, list):
+                for msg in reversed(results):
+                    if msg.get("role") == "assistant" and msg.get("type") == "message":
+                        content = msg.get("content", "")
+                        return f"O Cérebro Auxiliar completou a tarefa. Relato:\n{content}"
+            return f"O Cérebro Auxiliar rodou em segundo plano. Detalhe raw: {str(results)[:150]}"
+        except Exception as exc:
+            return f"O Open Interpreter falhou: {exc}"
 
 
 class OfflineCortanaApp:

@@ -836,6 +836,45 @@ class Assistant(Agent, llm.ToolContext):
         await whatsapp_bridge.disconnect_whatsapp()
         return "WhatsApp desconectado."
 
+    @agents.function_tool
+    async def tarefa_complexa_avancada(self, instrucao: str) -> str:
+        """
+        [USO RESTRITO] Use EXCLUSIVAMENTE como ULTIMO RECURSO se você nao tiver ferramentas prontas (nativas) capazes de resolver a demanda.
+        Essa ferramenta usa inteligencia local Python (Open Interpreter) para criar e rodar rotinas que resolvem tarefas no SO.
+        """
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+            
+        try:
+            from interpreter import interpreter
+            
+            interpreter.auto_run = True
+            
+            google_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            if google_key and not os.getenv("INTERPRETER_MODEL", "").startswith("ollama/"):
+                interpreter.llm.model = os.getenv("INTERPRETER_MODEL", "gemini/gemini-2.5-flash")
+                interpreter.llm.api_key = google_key
+            else:
+                interpreter.llm.model = os.getenv("INTERPRETER_MODEL", "ollama/llama3")
+                
+            interpreter.llm.max_tokens = 2048
+            
+            # Aqui rola o loop agente->python->terminal
+            results = interpreter.chat(instrucao)
+            
+            if results and isinstance(results, list):
+                # Percorre revertido para achar a ultima string de assistente
+                for msg in reversed(results):
+                    if msg.get("role") == "assistant" and msg.get("type") == "message":
+                        content = msg.get("content", "")
+                        return f"O Cérebro Auxiliar completou a tarefa. Relato:\n{content}"
+                        
+            return f"O Cérebro Auxiliar rodou em segundo plano. Detalhe raw parcial: {str(results)[:150]}"
+        except Exception as exc:
+            return f"O Open Interpreter falhou: {exc}"
+
+
 
 async def entrypoint(ctx: agents.JobContext) -> None:
     user_id = DEFAULT_USER_ID

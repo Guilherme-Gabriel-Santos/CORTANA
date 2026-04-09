@@ -9,3 +9,5 @@ requests
 PySide6
 edge-tts
 pygame
+open-interpreter
+litellm
