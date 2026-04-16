@@ -27,7 +27,7 @@ import whatsapp_bridge as whatsapp_bridge
 from automacao_cortana import CortanaControl
 from cyber_audit import CyberSentry
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
-from shared_memory import shared_memory
+from obsidian_memory import obsidian_memory as shared_memory
 from whatsapp_runtime import get_whatsapp_status, send_whatsapp_message
 
 try:
