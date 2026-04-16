@@ -22,5 +22,6 @@ pywebostv
 samsungtvws
 androidtv
 adb-shell
+beautifulsoup4
 open-interpreter
 litellm

@@ -25,6 +25,7 @@ from cloud_memory_sync import sync_mem0_to_shared
 from face_auth import FaceAuthManager
 import whatsapp_bridge as whatsapp_bridge
 from automacao_cortana import CortanaControl
+from cyber_audit import CyberSentry
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
 from shared_memory import shared_memory
 from whatsapp_runtime import get_whatsapp_status, send_whatsapp_message
@@ -357,6 +358,7 @@ class Assistant(Agent, llm.ToolContext):
             chat_ctx=chat_ctx or ChatContext(),
         )
         self.cortana_control = CortanaControl()
+        self._cyber_sentry = CyberSentry(headed=True)
         self._session = session
         self._last_whatsapp_contact: str | None = None
         self._last_whatsapp_message: str | None = None
@@ -835,6 +837,118 @@ class Assistant(Agent, llm.ToolContext):
             return auth_error
         await whatsapp_bridge.disconnect_whatsapp()
         return "WhatsApp desconectado."
+
+    # ------------------------------------------------------------------
+    # CyberSentry — Ferramentas de Auditoria de Segurança Web
+    # ------------------------------------------------------------------
+
+    @agents.function_tool
+    async def iniciar_auditoria_completa(self, url: str) -> str:
+        """Inicia auditoria de segurança completa em um alvo web: crawling, headers, TLS, cookies, fingerprint, arquivos sensíveis e gera relatório profissional."""
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+        try:
+            speech = _SpeechAdapter(self._session)
+
+            async def _progress(msg: str) -> None:
+                await speech.say(msg)
+
+            result = await self._cyber_sentry.full_audit(url, callback=_progress)
+            paths = await self._cyber_sentry.save_report(result)
+
+            findings = result.sorted_findings()
+            crits = sum(1 for f in findings if f.severity == "CRITICAL")
+            highs = sum(1 for f in findings if f.severity == "HIGH")
+
+            summary = (
+                f"Auditoria finalizada para {result.domain}. "
+                f"{len(findings)} observações encontradas"
+            )
+            if crits:
+                summary += f", sendo {crits} críticas"
+            if highs:
+                summary += f" e {highs} de alta severidade"
+            summary += f". Relatório salvo em: {paths.get('directory', 'N/A')}"
+
+            return summary
+        except Exception as exc:
+            return f"Erro na auditoria: {exc}"
+
+    @agents.function_tool
+    async def mapear_superficie_web(self, url: str) -> str:
+        """Faz crawling do site para descobrir rotas, formulários, assets JS e APIs sem executar análise de segurança."""
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+        try:
+            result = await self._cyber_sentry.crawl(url)
+            return (
+                f"Mapeamento de {result.domain} concluído. "
+                f"Rotas: {len(result.routes)}, "
+                f"Formulários: {len(result.forms)}, "
+                f"JS assets: {len(result.js_assets)}, "
+                f"Chamadas de API: {len(result.api_endpoints)}."
+            )
+        except Exception as exc:
+            return f"Erro no crawling: {exc}"
+
+    @agents.function_tool
+    async def analisar_headers_e_tls(self, url: str) -> str:
+        """Análise rápida de headers de segurança, cookies, CSP, CORS e TLS de um site, sem crawling."""
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+        try:
+            result = await self._cyber_sentry.quick_header_audit(url)
+            findings = result.sorted_findings()
+            if not findings:
+                return f"Nenhum problema detectado nos headers e TLS de {result.domain}."
+
+            lines = [f"Análise rápida de {result.domain}: {len(findings)} observações."]
+            for f in findings[:8]:
+                lines.append(f"- [{f.severity}] {f.title}")
+            if len(findings) > 8:
+                lines.append(f"... e mais {len(findings) - 8} observações.")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Erro na análise: {exc}"
+
+    @agents.function_tool
+    async def capturar_evidencia_visual(self, url: str, seletor_css: str = "") -> str:
+        """Captura screenshot de página inteira ou de um elemento específico via CSS selector como evidência de auditoria."""
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+        try:
+            selector = seletor_css.strip() if seletor_css else None
+            path = await self._cyber_sentry.capture_screenshot(url, css_selector=selector)
+            return f"Screenshot salvo em: {path}"
+        except Exception as exc:
+            return f"Erro na captura: {exc}"
+
+    @agents.function_tool
+    async def gerar_relatorio_pentest(self, dominio: str) -> str:
+        """Gera relatório profissional de pentest em Markdown e PDF com os dados coletados da última auditoria do domínio informado."""
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+        try:
+            result = self._cyber_sentry._cache.get(dominio)
+            if not result:
+                return (
+                    f"Sem dados de auditoria para '{dominio}'. "
+                    "Execute iniciar_auditoria_completa ou analisar_headers_e_tls primeiro."
+                )
+            paths = await self._cyber_sentry.save_report(result)
+            return (
+                f"Relatório gerado para {dominio}. "
+                f"PDF: {paths.get('pdf', 'N/A')}. "
+                f"Markdown: {paths.get('markdown', 'N/A')}. "
+                f"Pasta: {paths.get('directory', 'N/A')}."
+            )
+        except Exception as exc:
+            return f"Erro ao gerar relatório: {exc}"
 
     @agents.function_tool
     async def tarefa_complexa_avancada(self, instrucao: str) -> str:
