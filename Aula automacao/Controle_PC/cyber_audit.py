@@ -1,11 +1,22 @@
-"""CyberSentry — Módulo de auditoria de segurança web da Cortana.
+"""CyberSentry v2.0 — Motor de auditoria de segurança web da Cortana.
 
-Fornece crawler autorizado via Playwright (headed), análise passiva de
-headers/cookies/TLS/CSP/CORS, fingerprint de tecnologias, detecção de arquivos
-sensíveis e sourcemaps, captura de evidências (screenshots + tracing) e geração
-de relatórios profissionais em Markdown e PDF.
+Pipeline completa de pentest automatizado com 8 fases:
+  1. Crawling e inventário da superfície web (Playwright headed)
+  2. Análise de headers, CSP e CORS
+  3. Análise de cookies
+  4. TLS/SSL e fingerprint de stack
+  5. Detecção de arquivos sensíveis e sourcemaps
+  6. Recon avançado (DNS, WHOIS, subdomínios, dirbusting)
+  7. Fuzzing de injeções (SQLi, XSS, SSTI, CMDi, LFI)
+  8. Testes OWASP (CSRF, IDOR, Open Redirect, JS Secrets, Debug Mode)
 
-⚠️  Use APENAS em alvos dos quais você tem autorização explícita.
+Sub-módulos:
+  - cyber_recon.py  — DNS enum, WHOIS, subdomínios, dirbusting
+  - cyber_fuzzer.py — SQLi, XSS, SSTI, CMDi, Path Traversal
+  - cyber_owasp.py  — CSRF, IDOR, Open Redirect, JS Secrets, Debug
+
+⚠️  Use APENAS em alvos dos quais você tenha autorização explícita.
+    Os testes de Fase 7 enviam payloads ofensivos reais.
 """
 
 from __future__ import annotations
@@ -25,7 +36,10 @@ from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import requests
+import urllib3
 from bs4 import BeautifulSoup
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +60,7 @@ SECURITY_HEADERS: dict[str, dict[str, str]] = {
             "O header Strict-Transport-Security não está presente. "
             "O navegador pode aceitar conexões HTTP não criptografadas."
         ),
+        "attack_scenario": "Um atacante na mesma rede (Wi-Fi de café, ex) pode realizar um ataque Man-in-the-Middle (MitM) fazendo um 'SSL Stripping'. Ele força a vítima a navegar na versão HTTP do site, conseguindo interceptar senhas, tokens de sessão e dados de cartão de crédito em texto claro.",
         "remediation": (
             "Adicionar o header:\n"
             "`Strict-Transport-Security: max-age=31536000; includeSubDomains; preload`"
@@ -58,6 +73,7 @@ SECURITY_HEADERS: dict[str, dict[str, str]] = {
             "Sem esse header o navegador pode fazer MIME-sniffing, permitindo "
             "que arquivos enviados como texto sejam interpretados como scripts."
         ),
+        "attack_scenario": "Se o site permitir upload de arquivos ou refletir dados do usuário, um atacante pode fazer upload de um arquivo fingindo ser uma imagem, mas contendo código JavaScript malicioso. O navegador da vítima irá executar o script (XSS), roubando a conta do usuário.",
         "remediation": "Adicionar: `X-Content-Type-Options: nosniff`",
     },
     "X-Frame-Options": {
@@ -67,6 +83,7 @@ SECURITY_HEADERS: dict[str, dict[str, str]] = {
             "Sem X-Frame-Options, a página pode ser embutida em iframes "
             "maliciosos (clickjacking)."
         ),
+        "attack_scenario": "O atacante cria um site falso com um botão 'Ganhe um prêmio'. Por trás desse botão, ele carrega o sistema da empresa invadida de forma invisível. Quando a vítima clica no botão, ela na verdade está clicando para 'Transferir fundos' ou 'Deletar conta' dentro do sistema da empresa, sem perceber.",
         "remediation": "Adicionar: `X-Frame-Options: DENY` ou `SAMEORIGIN`",
     },
     "Content-Security-Policy": {
@@ -76,6 +93,7 @@ SECURITY_HEADERS: dict[str, dict[str, str]] = {
             "Sem CSP, o navegador não tem restrições sobre quais recursos "
             "podem ser carregados, facilitando ataques XSS."
         ),
+        "attack_scenario": "Sendo a última linha de defesa, a falta de CSP significa que se houver qualquer brecha de Injeção de Código (XSS) no site, o atacante poderá injetar um script externo (como um Keylogger invisível) ou usar o site da empresa para instalar malwares e minerar criptomoedas nas máquinas dos clientes.",
         "remediation": (
             "Implementar uma política CSP. Exemplo mínimo:\n"
             "`Content-Security-Policy: default-src 'self'; script-src 'self'`"
@@ -88,6 +106,7 @@ SECURITY_HEADERS: dict[str, dict[str, str]] = {
             "O Referer completo pode vazar caminhos internos e tokens de query string "
             "para terceiros."
         ),
+        "attack_scenario": "Se o sistema da empresa usar tokens na URL (ex: `site.com/reset-password?token=123`), ao clicar em qualquer link externo na página, o site de destino recebe essa URL completa. O dono desse outro site pode registrar o token e assumir imediatamente o controle da conta da vítima.",
         "remediation": "Adicionar: `Referrer-Policy: strict-origin-when-cross-origin`",
     },
     "Permissions-Policy": {
@@ -97,6 +116,7 @@ SECURITY_HEADERS: dict[str, dict[str, str]] = {
             "Sem Permissions-Policy, o navegador não restringe acesso a câmera, "
             "microfone, geolocalização e outras APIs sensíveis."
         ),
+        "attack_scenario": "Um atacante que consiga injetar um script leve em um portal de notícias ou blog corporativo poderia ativar sub-recursos (um componente de publicidade, por exemplo) para acessar as permissões concedidas pelo usuário (como câmera ou microfone) silenciosamente.",
         "remediation": (
             "Adicionar: `Permissions-Policy: camera=(), microphone=(), geolocation=()`"
         ),
@@ -108,6 +128,7 @@ SECURITY_HEADERS: dict[str, dict[str, str]] = {
             "Header legado, mas ainda ajuda navegadores antigos a bloquear "
             "respostas que detectem reflexão de XSS."
         ),
+        "attack_scenario": "-",
         "remediation": "Adicionar: `X-XSS-Protection: 1; mode=block`",
     },
 }
@@ -207,6 +228,7 @@ class Finding:
     category: str
     title: str
     description: str
+    attack_scenario: str = ""
     evidence: str = ""
     remediation: str = ""
     references: list[str] = field(default_factory=list)
@@ -230,6 +252,16 @@ class AuditResult:
     sensitive_files: list[dict[str, Any]] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     screenshots: list[str] = field(default_factory=list)
+    # v2.0 — Recon
+    dns_records: dict[str, Any] = field(default_factory=dict)
+    whois_data: dict[str, Any] = field(default_factory=dict)
+    subdomains: list[dict[str, Any]] = field(default_factory=list)
+    discovered_dirs: list[dict[str, Any]] = field(default_factory=list)
+    # v2.0 — Injeções e OWASP
+    injection_findings: list[dict[str, Any]] = field(default_factory=list)
+    owasp_findings: list[dict[str, Any]] = field(default_factory=list)
+    js_secrets: list[dict[str, Any]] = field(default_factory=list)
+    html_comments: list[dict[str, Any]] = field(default_factory=list)
 
     def add(self, finding: Finding) -> None:
         self.findings.append(finding)
@@ -421,6 +453,7 @@ class CyberSentry:
                     category="Headers de Segurança",
                     title=meta["title"],
                     description=meta["description"],
+                    attack_scenario=meta.get("attack_scenario", ""),
                     evidence=f"Header `{header_name}` não encontrado na resposta.",
                     remediation=meta["remediation"],
                 ))
@@ -432,6 +465,7 @@ class CyberSentry:
                     category="Information Disclosure",
                     title=f"Header `{leak_header}` revela informação de stack",
                     description=f"O header `{leak_header}: {val}` expõe detalhes da infraestrutura.",
+                    attack_scenario="Atacantes utilizam essa informação para direcionar exploits específicos conhecidos contra as exatas versões da infraestrutura utilizada, economizando tempo no reconhecimento e aumentando o sucesso do ataque cibernético.",
                     evidence=f"`{leak_header}: {val}`",
                     remediation=f"Remover ou ofuscar o header `{leak_header}` no servidor.",
                 ))
@@ -474,6 +508,7 @@ class CyberSentry:
                     category="Cookies",
                     title=f"Cookie `{cookie_info['name']}` com configuração insegura",
                     description=f"Problemas encontrados: {', '.join(issues)}.",
+                    attack_scenario="A ausência de HttpOnly permite que qualquer vulnerabilidade XSS seja usada para extrair esse cookie. Se o cookie for a credencial de sessão de um cliente ou administrador, o hacker assumirá total controle de sua conta corporativa (Account Takeover). Sem a flag Secure, o cookie pode ser roubado em redes abertas antes do redirecionamento para HTTPS.",
                     evidence=json.dumps(cookie_info, indent=2),
                     remediation=f"Configurar o cookie `{cookie_info['name']}` com as flags `Secure; HttpOnly; SameSite=Strict`.",
                 ))
@@ -498,6 +533,7 @@ class CyberSentry:
                 category="CSP (Content Security Policy)",
                 title="CSP com diretivas perigosas",
                 description="A política CSP contém diretivas que enfraquecem sua eficácia.",
+                attack_scenario="Com 'unsafe-inline' ou 'unsafe-eval' liberados, qualquer mínimo defeito nos formulários ou campos de pesquisa do site permite a execução de JavaScript arbitrário. Criminosos cibernéticos podem explorar isso para criar falsas telas de login flutuantes na sua página real para roubar dados bancários de clientes, e os proteções do navegador não bloquearão isso.",
                 evidence=f"CSP: `{csp[:300]}`\n\nProblemas:\n" + "\n".join(f"- {d}" for d in dangerous),
                 remediation="Remover diretivas perigosas e usar nonces ou hashes para scripts inline.",
             ))
@@ -511,10 +547,11 @@ class CyberSentry:
             result.add(Finding(
                 severity=sev,
                 category="CORS",
-                title="CORS com origem wildcard",
+                title="CORS com origem wildcard (*)",
                 description="O header `Access-Control-Allow-Origin: *` permite que qualquer site faça requisições cross-origin.",
+                attack_scenario="Se um usuário da plataforma corporativa visitar um site externo criado por um atacante, esse site falso possuirá carta-branca para executar chamadas na API interna do cliente sob a identidade já autenticada da vítima. Ele poderia, por exemplo, furtar os dados privados lendo as respostas JSON do servidor como se fosse a aplicação legítima.",
                 evidence=f"`Access-Control-Allow-Origin: {acao}`\n`Access-Control-Allow-Credentials: {creds}`",
-                remediation="Restringir a origem a domínios confiáveis.",
+                remediation="Restringir a origem a domínios confiáveis do escopo da própria empresa.",
             ))
 
     def analyze_tls(self, result: AuditResult) -> None:
@@ -528,6 +565,7 @@ class CyberSentry:
                 category="TLS/SSL",
                 title="Site não utiliza HTTPS",
                 description="A conexão não é criptografada.",
+                attack_scenario="Em conexões abertas, todos os dados de cartões de crédito e logins viajam descriptografados pelo roteador, provedor e backbones de telecomunicações, podendo ser rastreados por atacantes locais.",
                 evidence=f"Esquema: `{parsed.scheme}`",
                 remediation="Implementar HTTPS com certificado TLS válido.",
             ))
@@ -542,10 +580,10 @@ class CyberSentry:
                 cipher = sock.cipher()
                 protocol = sock.version()
         except ssl.SSLCertVerificationError as exc:
-            result.add(Finding(severity="CRITICAL", category="TLS/SSL", title="Certificado TLS inválido", description=str(exc), evidence=str(exc), remediation="Renovar o certificado."))
+            result.add(Finding(severity="CRITICAL", category="TLS/SSL", title="Certificado TLS inválido", description=str(exc), attack_scenario="Basta estar na mesma sub-rede ou forjar um DNS para que criminosos apontem o domínio para um servidor espelho e capturem clientes. Como o certificado está quebrado ou a raiz não é confiável, as defesas do navegador irão espantar visitantes honestos.", evidence=str(exc), remediation="Renovar e configurar adequadamente a cadeia do certificado."))
             return
         except Exception as exc:
-            result.add(Finding(severity="HIGH", category="TLS/SSL", title="Não foi possível estabelecer conexão TLS", description=str(exc), evidence=str(exc)))
+            result.add(Finding(severity="HIGH", category="TLS/SSL", title="Não foi possível estabelecer conexão TLS", description=str(exc), attack_scenario="-", evidence=str(exc)))
             return
 
         not_after = cert.get("notAfter", "")
@@ -563,16 +601,17 @@ class CyberSentry:
         if not_after:
             try:
                 expiry = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
-                days_left = (expiry - datetime.utcnow()).days
+                days_left = (expiry - datetime.now(timezone.utc).replace(tzinfo=None)).days
                 if days_left < 0:
-                    result.add(Finding(severity="CRITICAL", category="TLS/SSL", title="Certificado TLS expirado", description=f"Expirou há {abs(days_left)} dias.", evidence=f"Expiração: `{not_after}`", remediation="Renovar o certificado TLS imediatamente."))
+                    result.add(Finding(severity="CRITICAL", category="TLS/SSL", title="Certificado TLS expirado", description=f"Expirou há {abs(days_left)} dias.", attack_scenario="Clientes tentando acessar a loja/aplicação enfrentarão alertas vermelhos do navegador impedindo o acesso à ferramenta.", evidence=f"Expiração: `{not_after}`", remediation="Renovar o certificado TLS imediatamente."))
                 elif days_left < 30:
-                    result.add(Finding(severity="MEDIUM", category="TLS/SSL", title="Certificado TLS expirando em breve", description=f"Expira em {days_left} dias.", evidence=f"Expiração: `{not_after}`", remediation="Agendar a renovação."))
+                    result.add(Finding(severity="MEDIUM", category="TLS/SSL", title="Certificado TLS expirando em breve", description=f"Expira em {days_left} dias.", attack_scenario="-", evidence=f"Expiração: `{not_after}`", remediation="Agendar a renovação para impedir inatividade iminente da operação."))
             except Exception:
                 pass
 
         if protocol and protocol in ("TLSv1", "TLSv1.1", "SSLv3", "SSLv2"):
-            result.add(Finding(severity="HIGH", category="TLS/SSL", title=f"Protocolo TLS fraco ({protocol})", description=f"O servidor negociou `{protocol}`, considerado inseguro.", evidence=f"Protocolo: `{protocol}`", remediation="Desabilitar TLSv1.0/1.1 e SSLv3. Usar TLSv1.2+"))
+            result.add(Finding(severity="HIGH", category="TLS/SSL", title=f"Protocolo TLS fraco ({protocol})", description=f"O servidor negociou `{protocol}`, considerado inseguro e vulnerável a downgrade attacks.", attack_scenario="Atacantes qualificados em posições MitM (provedores, interceptadores) podem rebaixar conexões criptografadas das sessões corporativas pelo fato da aplicação tolerar versões defasadas de handshakes.", evidence=f"Protocolo: `{protocol}`", remediation="Desabilitar TLSv1.0/1.1 e SSLv3. Usar apenas TLSv1.2 e TLSv1.3."))
+
 
     async def fingerprint(self, url: str, result: AuditResult) -> None:
         combined = json.dumps(result.raw_headers) + " "
@@ -624,13 +663,24 @@ class CyberSentry:
                 if is_html and re.search(r"(404|not\s*found|page\s*not)", body_snippet, re.IGNORECASE):
                     continue
                 result.sensitive_files.append({"path": path, "status": resp.status_code, "size": len(resp.content), "snippet": body_snippet[:200]})
+                
+                # Gerar um cenario dinamico
+                vuln_impact = "Um atacante pode baixar o backup do banco de dados, o que resulta na exfiltração imediata de toda a base de clientes, hashes de senhas e dados financeiros confidenciais." if ".sql" in path.lower() or "backup" in path.lower() else (
+                    "Esse vazamento compromete chaves privadas e credenciais de nuvem em plain-text, dando ao atacante acesso direto às nuvens da corporação e permitindo execução remota de código e sequestro dos clusters." if "env" in path or "config" in path else (
+                        "O invasor faz o download integral do código fonte reservado da companhia e da arquitetura do servidor, podendo realizar engenharia reversa das defesas para aplicar zero-days locais sem interagir cegamente de fora." if ".git" in path else (
+                            "Atacantes podem enumerar todas as dependências internas do projeto buscando versões antigas de componentes com CVEs públicos prontos para ser explorados via Injeção."
+                        )
+                    )
+                )
+
                 result.add(Finding(
                     severity=severity,
-                    category="Arquivos Sensíveis",
-                    title=title,
-                    description=f"O caminho `{path}` está acessível publicamente.",
-                    evidence=f"URL: `{probe_url}`\nStatus: `{resp.status_code}`\nTamanho: `{len(resp.content)}` bytes\n\nSnippet:\n```\n{body_snippet[:200]}\n```",
-                    remediation=f"Bloquear o acesso a `{path}` no servidor web.",
+                    category="Arquivos Sensíveis e Vazamentos de Dados (Data Leak)",
+                    title=f"Vazamento grave: {title}",
+                    description=f"O diretório ou arquivo `{path}` sigiloso foi detectado exposto à internet de forma pública, o que burla as barreiras do sistema da empresa.",
+                    attack_scenario=vuln_impact,
+                    evidence=f"URL: `{probe_url}`\nStatus: `{resp.status_code}`\nTamanho: `{len(resp.content)}` bytes\n\nSnippet Visto:\n```\n{body_snippet[:200]}\n```",
+                    remediation=f"Restringir privilégios HTTP publicamente sobre arquivos críticos do workspace e blindar a raiz web bloqueando requisições direta para `{path}` no servidor.",
                 ))
             await asyncio.sleep(0.15)
 
@@ -642,11 +692,12 @@ class CyberSentry:
                     result.sensitive_files.append({"path": map_url, "status": 200, "size": int(resp.headers.get("content-length", 0)), "type": "sourcemap"})
                     result.add(Finding(
                         severity="HIGH",
-                        category="Sourcemaps",
-                        title="Sourcemap JavaScript exposto",
-                        description=f"O sourcemap `{map_url}` está acessível, permitindo reconstrução do código-fonte.",
-                        evidence=f"URL: `{map_url}`",
-                        remediation="Remover sourcemaps do servidor de produção.",
+                        category="Sourcemaps e Engenharia Reversa",
+                        title="Sourcemap JavaScript altamente exposto",
+                        description=f"O sourcemap `{map_url}` está publicamente disponível e serve como um mapa para reverter a ofuscação do código.",
+                        attack_scenario="Atacantes qualificados rastreiam o Front-end e realizam engenharia reversa perfeitamente em horas em busca de falhas invisíveis em lógicas obscuras na regra de negócio; lendo o código que deveria estar ofuscado como se vissem a máquina do Dev.",
+                        evidence=f"O URL rastreado que retornou os diagramas do código foi:\n`{map_url}`",
+                        remediation="Desativar `source-maps` do processo de build de produção (`npm run build`).",
                     ))
             except Exception:
                 pass
@@ -675,26 +726,226 @@ class CyberSentry:
         return str(path)
 
     async def full_audit(self, url: str, callback=None) -> AuditResult:
+        """Pipeline completa de auditoria de segurança — 8 fases."""
+        from cyber_recon import dns_enum, whois_lookup, subdomain_enum, dirbust
+        from cyber_fuzzer import fuzz_all_inputs
+        from cyber_owasp import (
+            test_csrf, test_open_redirect, detect_idor_patterns,
+            enumerate_http_methods, test_cors_advanced,
+            extract_js_secrets, detect_debug_mode, extract_html_comments,
+        )
+
         if callback:
-            await callback("🚀 Iniciando auditoria de segurança...")
+            await callback("🚀 Iniciando auditoria de segurança CyberSentry v2.0...")
+
+        # === FASE 1: Crawling ===
         if callback:
-            await callback("📡 Fase 1/5 — Crawling e inventário da superfície web...")
+            await callback("📡 Fase 1/8 — Crawling e inventário da superfície web...")
         result = await self.crawl(url, callback=callback)
+
+        # === FASE 2: Headers, CSP, CORS ===
         if callback:
-            await callback("🛡️ Fase 2/5 — Análise de headers, CSP e CORS...")
+            await callback("🛡️ Fase 2/8 — Análise de headers, CSP e CORS...")
         self.analyze_headers(result)
         self.analyze_csp(result)
         self.analyze_cors(result)
+
+        # === FASE 3: Cookies ===
         if callback:
-            await callback("🍪 Fase 3/5 — Análise de cookies...")
+            await callback("🍪 Fase 3/8 — Análise de cookies...")
         await self.analyze_cookies(url, result)
+
+        # === FASE 4: TLS/SSL + Fingerprint ===
         if callback:
-            await callback("🔐 Fase 4/5 — TLS/SSL e fingerprint de stack...")
+            await callback("🔐 Fase 4/8 — TLS/SSL e fingerprint de stack...")
         self.analyze_tls(result)
         await self.fingerprint(url, result)
+
+        # === FASE 5: Arquivos sensíveis ===
         if callback:
-            await callback("🔎 Fase 5/5 — Detecção de arquivos sensíveis e sourcemaps...")
+            await callback("🔎 Fase 5/8 — Detecção de arquivos sensíveis e sourcemaps...")
         await self.probe_sensitive_files(url, result, callback=callback)
+
+        # === FASE 6: Recon Avançado ===
+        if callback:
+            await callback("🔍 Fase 6/8 — Recon avançado (DNS, WHOIS, subdomínios, dirbusting)...")
+        try:
+            result.dns_records = dns_enum(result.domain)
+            result.whois_data = whois_lookup(result.domain)
+            result.subdomains = await subdomain_enum(result.domain, callback=callback)
+            if result.subdomains:
+                result.add(Finding(
+                    severity="INFO",
+                    category="Recon — Subdomínios",
+                    title=f"{len(result.subdomains)} subdomínios descobertos",
+                    description="Subdomínios encontrados via DNS brute-force.",
+                    evidence="\n".join(f"- `{s['subdomain']}` → {', '.join(s['ips'])}" for s in result.subdomains[:20]),
+                    remediation="Verificar se subdomínios expostos são intencionais e se possuem as mesmas proteções do domínio principal.",
+                ))
+            result.discovered_dirs = await dirbust(url, callback=callback)
+            new_dirs = [d for d in result.discovered_dirs if d["path"] not in {sf.get("path") for sf in result.sensitive_files}]
+            for d in new_dirs:
+                sev = "HIGH" if d["status"] == 200 and any(kw in d["path"].lower() for kw in ("admin", "debug", "backup", "dump", ".env", ".git")) else (
+                    "MEDIUM" if d["status"] == 200 else "LOW"
+                )
+                result.add(Finding(
+                    severity=sev,
+                    category="Dirbusting",
+                    title=f"Diretório/recurso encontrado: `{d['path']}`",
+                    description=f"O recurso `{d['path']}` respondeu com status `{d['status']}`.",
+                    attack_scenario="Diretórios e rotas ocultas expostos publicamente podem revelar painéis administrativos, backups, configurações e funcionalidades de debug que permitem acesso não autorizado.",
+                    evidence=f"URL: `{d['url']}`\nStatus: `{d['status']}`\nTamanho: `{d['size']}` bytes",
+                    remediation=f"Restringir o acesso a `{d['path']}` via autenticação ou bloqueio no servidor web.",
+                ))
+        except Exception as exc:
+            logger.warning("[CyberSentry] Recon phase error: %s", exc)
+
+        # === FASE 7: Fuzzing de Injeções ===
+        if callback:
+            await callback("💉 Fase 7/8 — Fuzzing de injeções (SQLi, XSS, SSTI, CMDi, LFI)...")
+        try:
+            # Coletar todos os parâmetros de todas as rotas
+            all_params: dict[str, str] = {}
+            for route in result.routes:
+                from urllib.parse import urlparse as _up, parse_qs as _pq
+                qs = _pq(_up(route["url"]).query)
+                for k, v in qs.items():
+                    if k not in all_params:
+                        all_params[k] = v[0]
+
+            urls_with_params = [r["url"] for r in result.routes if "?" in r["url"]]
+            for test_url in urls_with_params[:10]:  # Limitar a 10 URLs para performance
+                injection_results = await fuzz_all_inputs(
+                    test_url,
+                    forms=result.forms,
+                    callback=callback,
+                )
+                for inj in injection_results:
+                    result.injection_findings.append(inj)
+                    result.add(Finding(
+                        severity=inj.get("severity", "HIGH"),
+                        category=f"Injeção — {inj['type']}",
+                        title=f"{inj['type']} ({inj.get('subtype', '')}) em `{inj.get('param', '?')}`",
+                        description=f"Payload: `{inj.get('payload', '?')}`",
+                        attack_scenario=inj.get("attack_scenario", ""),
+                        evidence=inj.get("evidence", ""),
+                        remediation=f"Sanitizar e parametrizar todas as entradas do parâmetro `{inj.get('param', '?')}`.",
+                    ))
+
+            # Também testar forms sem query params
+            if result.forms and not urls_with_params:
+                injection_results = await fuzz_all_inputs(
+                    url, forms=result.forms, callback=callback,
+                )
+                for inj in injection_results:
+                    result.injection_findings.append(inj)
+                    result.add(Finding(
+                        severity=inj.get("severity", "HIGH"),
+                        category=f"Injeção — {inj['type']}",
+                        title=f"{inj['type']} ({inj.get('subtype', '')}) em `{inj.get('param', '?')}`",
+                        description=f"Payload: `{inj.get('payload', '?')}`",
+                        attack_scenario=inj.get("attack_scenario", ""),
+                        evidence=inj.get("evidence", ""),
+                        remediation=f"Sanitizar e parametrizar todas as entradas do parâmetro `{inj.get('param', '?')}`.",
+                    ))
+        except Exception as exc:
+            logger.warning("[CyberSentry] Fuzzing phase error: %s", exc)
+
+        # === FASE 8: OWASP Top 10 ===
+        if callback:
+            await callback("🏴 Fase 8/8 — Testes OWASP (CSRF, IDOR, Redirect, JS Secrets, Debug)...")
+        try:
+            # CSRF
+            csrf_findings = test_csrf(result.forms)
+            for f in csrf_findings:
+                result.owasp_findings.append(f)
+                result.add(Finding(
+                    severity=f["severity"], category="OWASP — CSRF",
+                    title=f"CSRF: {f.get('subtype', '')}",
+                    description=f.get("evidence", ""),
+                    attack_scenario=f.get("attack_scenario", ""),
+                    remediation="Implementar tokens CSRF em todos os formulários POST.",
+                ))
+
+            # IDOR
+            idor_findings = detect_idor_patterns(result.routes)
+            for f in idor_findings:
+                result.owasp_findings.append(f)
+                result.add(Finding(
+                    severity=f["severity"], category="OWASP — IDOR",
+                    title=f"IDOR: {f.get('subtype', '')}",
+                    description=f.get("evidence", ""),
+                    attack_scenario=f.get("attack_scenario", ""),
+                    remediation="Validar no backend se o recurso pertence ao usuário autenticado.",
+                ))
+
+            # HTTP Methods
+            route_urls = [r["url"] for r in result.routes[:20]]
+            method_findings = await enumerate_http_methods(route_urls)
+            for f in method_findings:
+                result.owasp_findings.append(f)
+                result.add(Finding(
+                    severity=f["severity"], category="OWASP — HTTP Methods",
+                    title=f"Métodos perigosos: {f.get('subtype', '')}",
+                    description=f.get("evidence", ""),
+                    attack_scenario=f.get("attack_scenario", ""),
+                    remediation="Desabilitar métodos HTTP desnecessários no servidor.",
+                ))
+
+            # CORS Avançado
+            cors_findings = await test_cors_advanced(url)
+            for f in cors_findings:
+                result.owasp_findings.append(f)
+                result.add(Finding(
+                    severity=f["severity"], category="OWASP — CORS",
+                    title=f"CORS: {f.get('subtype', '')}",
+                    description=f.get("evidence", ""),
+                    attack_scenario=f.get("attack_scenario", ""),
+                    remediation="Validar origens no servidor e nunca refletir Origin arbitrário.",
+                ))
+
+            # JS Secrets
+            if callback:
+                await callback("🔑 Extraindo segredos do JavaScript...")
+            js_findings = await extract_js_secrets(result.js_assets, callback=callback)
+            for f in js_findings:
+                result.js_secrets.append(f)
+                result.add(Finding(
+                    severity=f["severity"], category="OWASP — JS Secrets",
+                    title=f"Segredo JS: {f.get('subtype', '')}",
+                    description=f.get("evidence", ""),
+                    attack_scenario=f.get("attack_scenario", ""),
+                    remediation="Remover chaves e tokens do código JavaScript. Usar variáveis de ambiente no backend.",
+                ))
+
+            # Debug Mode
+            debug_findings = await detect_debug_mode(route_urls)
+            for f in debug_findings:
+                result.owasp_findings.append(f)
+                result.add(Finding(
+                    severity=f["severity"], category="OWASP — Debug Mode",
+                    title=f"Debug: {f.get('subtype', '')}",
+                    description=f.get("evidence", ""),
+                    attack_scenario=f.get("attack_scenario", ""),
+                    remediation="Desabilitar modo debug em produção.",
+                ))
+
+            # Open Redirect
+            redirect_findings = await test_open_redirect(url)
+            for f in redirect_findings:
+                result.owasp_findings.append(f)
+                result.add(Finding(
+                    severity=f["severity"], category="OWASP — Open Redirect",
+                    title=f"Redirect: {f.get('subtype', '')}",
+                    description=f.get("evidence", ""),
+                    attack_scenario=f.get("attack_scenario", ""),
+                    remediation="Validar URLs de redirecionamento contra uma whitelist de domínios autorizados.",
+                ))
+
+        except Exception as exc:
+            logger.warning("[CyberSentry] OWASP phase error: %s", exc)
+
+        # === FINALIZAÇÃO ===
         result.finished_at = datetime.now(timezone.utc).isoformat()
         self._cache[result.domain] = result
         if callback:
@@ -705,7 +956,7 @@ class CyberSentry:
             lows = sum(1 for f in findings if f.severity == "LOW")
             infos = sum(1 for f in findings if f.severity == "INFO")
             await callback(
-                f"✅ Auditoria completa! Total: {len(findings)} findings — "
+                f"✅ Auditoria v2.0 completa! Total: {len(findings)} findings — "
                 f"🔴 {crits} CRITICAL  🟠 {highs} HIGH  🟡 {meds} MEDIUM  🔵 {lows} LOW  ⚪ {infos} INFO"
             )
         return result
@@ -784,6 +1035,10 @@ class CyberSentry:
             lines += [f"### {idx}. {badge} — {finding.title}", "",
                       f"**Categoria:** {finding.category}  ", f"**Severidade:** {finding.severity}", "",
                       f"**Descrição:**  ", finding.description, ""]
+            
+            if finding.attack_scenario and finding.attack_scenario != "-":
+                lines += ["**IMPACTO NOS NEGÓCIOS (Vetor de Ataque):**", "", finding.attack_scenario, ""]
+
             if finding.evidence:
                 lines += ["**Evidência:**", "", finding.evidence, ""]
             if finding.remediation:

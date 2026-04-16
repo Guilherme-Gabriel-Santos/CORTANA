@@ -23,5 +23,7 @@ samsungtvws
 androidtv
 adb-shell
 beautifulsoup4
+dnspython
+python-whois
 open-interpreter
 litellm

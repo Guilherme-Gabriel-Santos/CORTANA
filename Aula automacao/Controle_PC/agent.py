@@ -261,53 +261,13 @@ def _build_face_auth_manager() -> FaceAuthManager:
     )
 
 
-async def _load_user_memories(mem0_client: AsyncMemoryClient, user_id: str) -> str:
+async def _load_user_memories(user_id: str) -> str:
     sections: list[str] = []
-
-    try:
-        logger.info("[Mem0] Loading memories for '%s'...", user_id)
-        sync_stats = await sync_mem0_to_shared(user_id, client=mem0_client)
-        if sync_stats["fetched"]:
-            logger.info(
-                "[Mem0] %s memories hydrated to shared memory (%s new, %s existing).",
-                sync_stats["fetched"],
-                sync_stats["inserted"],
-                sync_stats["updated"],
-            )
-        response = await mem0_client.search(
-            query="historico, preferencias e informacoes pessoais do usuario",
-            filters={"user_id": user_id},
-            limit=5,
-        )
-    except Exception as exc:
-        logger.error("[Mem0] Failed to load memories: %s", exc)
-        local_context = shared_memory.build_context_block(user_id, fact_limit=12, episode_limit=2)
-        if local_context:
-            sections.append(local_context)
-        return "\n\n".join(sections).strip()
-
+    
+    logger.info("[Obsidian_Vault] Loading local memories for '%s'...", user_id)
     local_context = shared_memory.build_context_block(user_id, fact_limit=12, episode_limit=2)
     if local_context:
         sections.append(local_context)
-
-    if isinstance(response, dict):
-        results = response.get("results", [])
-    elif isinstance(response, list):
-        results = response
-    else:
-        results = []
-
-    memories: list[str] = []
-    for result in results:
-        if not isinstance(result, dict):
-            continue
-        text = result.get("memory") or result.get("text") or result.get("content")
-        if text:
-            memories.append(f"- {text}")
-
-    if memories:
-        logger.info("[Mem0] %s memories loaded.", len(memories))
-        sections.append("Memorias sincronizadas na nuvem:\n" + "\n".join(memories))
 
     return "\n\n".join(section for section in sections if section).strip()
 
@@ -319,17 +279,11 @@ class _SpeechAdapter:
     async def say(self, text: str, add_to_chat: bool = True) -> None:
         if not self._session:
             return
-        try:
-            logger.info("[SpeechAdapter] Speaking proactive message.")
-            await self._session.generate_reply(
-                instructions=(
-                    "Sua tarefa agora e apenas repassar esta notificacao para o usuario "
-                    f"de forma curta e natural: {text}"
-                ),
-                add_to_chat_ctx=add_to_chat,
-            )
-        except Exception as exc:
-            logger.error("[SpeechAdapter] Error while speaking: %s", exc)
+        
+        # Fallback OOB (Out-of-band) para terminal.
+        # A API Gemini Realtime via LiveKit trava (timeout no generation_created)
+        # ao tentar usar generate_reply enquanto um tool_call está em andamento.
+        logger.info("[Voice OOB] %s", text)
 
     async def speak_proactive_message(
         self,
@@ -951,6 +905,102 @@ class Assistant(Agent, llm.ToolContext):
             return f"Erro ao gerar relatório: {exc}"
 
     @agents.function_tool
+    async def recon_dns_whois(self, dominio: str) -> str:
+        """Reconhecimento DNS completo (A, AAAA, MX, NS, TXT, CNAME, SOA) e WHOIS de um domínio."""
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+        try:
+            from cyber_recon import dns_enum, whois_lookup
+            dns = dns_enum(dominio)
+            who = whois_lookup(dominio)
+            lines = [f"Recon DNS/WHOIS para {dominio}:"]
+            if dns.get("records"):
+                for rtype, records in dns["records"].items():
+                    lines.append(f"  {rtype}: {', '.join(str(r) for r in records[:5])}")
+            if who.get("whois"):
+                w = who["whois"]
+                if w.get("registrar"):
+                    lines.append(f"  Registrar: {w['registrar']}")
+                if w.get("creation_date"):
+                    lines.append(f"  Criação: {w['creation_date']}")
+                if w.get("expiration_date"):
+                    lines.append(f"  Expiração: {w['expiration_date']}")
+                if w.get("name_servers"):
+                    ns = w["name_servers"] if isinstance(w["name_servers"], list) else [w["name_servers"]]
+                    lines.append(f"  NS: {', '.join(ns[:4])}")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Erro no recon: {exc}"
+
+    @agents.function_tool
+    async def descobrir_subdominios(self, dominio: str) -> str:
+        """Enumera subdomínios de um domínio via DNS brute-force com wordlist de 200+ entradas."""
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+        try:
+            from cyber_recon import subdomain_enum
+            subs = await subdomain_enum(dominio)
+            if not subs:
+                return f"Nenhum subdomínio encontrado para {dominio}."
+            lines = [f"{len(subs)} subdomínios encontrados para {dominio}:"]
+            for s in subs[:25]:
+                lines.append(f"  - {s['subdomain']} → {', '.join(s['ips'])}")
+            if len(subs) > 25:
+                lines.append(f"  ... e mais {len(subs) - 25} subdomínios.")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Erro na enumeração: {exc}"
+
+    @agents.function_tool
+    async def testar_injecoes(self, url: str) -> str:
+        """Executa testes ativos de injeção (SQLi, XSS, SSTI, CMDi, LFI) em todos os parâmetros e formulários de uma URL."""
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+        try:
+            from cyber_fuzzer import fuzz_all_inputs
+            # Primeiro, crawl rápido para pegar forms
+            result = self._cyber_sentry._cache.get(urlparse(url).netloc)
+            forms = result.forms if result else []
+            findings = await fuzz_all_inputs(url, forms=forms)
+            if not findings:
+                return f"Nenhuma vulnerabilidade de injeção encontrada em {url}."
+            lines = [f"{len(findings)} vulnerabilidades de injeção encontradas em {url}:"]
+            for f in findings[:10]:
+                lines.append(f"  🔴 [{f.get('severity')}] {f['type']} em `{f.get('param', '?')}` — {f.get('subtype', '')}")
+            if len(findings) > 10:
+                lines.append(f"  ... e mais {len(findings) - 10} findings.")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Erro no fuzzing: {exc}"
+
+    @agents.function_tool
+    async def extrair_segredos_js(self, url: str) -> str:
+        """Varre os arquivos JavaScript de um site em busca de API keys, tokens, senhas e segredos hardcoded."""
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+        try:
+            from cyber_owasp import extract_js_secrets
+            result = self._cyber_sentry._cache.get(urlparse(url).netloc)
+            if not result or not result.js_assets:
+                return "Nenhum asset JavaScript em cache. Execute iniciar_auditoria_completa ou mapear_superficie_web primeiro."
+            findings = await extract_js_secrets(result.js_assets)
+            if not findings:
+                return "Nenhum segredo encontrado nos arquivos JavaScript."
+            lines = [f"{len(findings)} segredos encontrados no JavaScript:"]
+            for f in findings[:10]:
+                lines.append(f"  🔑 [{f.get('severity')}] {f.get('subtype', '')} — {f.get('evidence', '')[:80]}")
+            if len(findings) > 10:
+                lines.append(f"  ... e mais {len(findings) - 10} segredos.")
+            return "\n".join(lines)
+        except Exception as exc:
+            return f"Erro na extração: {exc}"
+
+
+    @agents.function_tool
     async def tarefa_complexa_avancada(self, instrucao: str) -> str:
         """
         [USO RESTRITO] Use EXCLUSIVAMENTE como ULTIMO RECURSO se você nao tiver ferramentas prontas (nativas) capazes de resolver a demanda.
@@ -992,10 +1042,9 @@ class Assistant(Agent, llm.ToolContext):
 
 async def entrypoint(ctx: agents.JobContext) -> None:
     user_id = DEFAULT_USER_ID
-    mem0_client = AsyncMemoryClient()
     face_auth = _build_face_auth_manager()
     initial_ctx = ChatContext()
-    memory_block = await _load_user_memories(mem0_client, user_id)
+    memory_block = await _load_user_memories(user_id)
     if memory_block:
         initial_ctx.add_message(
             role="assistant",
@@ -1114,18 +1163,11 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 messages,
                 source="online",
                 timestamp_label=timestamp,
-                write_json_snapshot=True,
             )
-            logger.info("[Episodic] Session saved to %s", file_path)
+            # O save_episode do obsidian (agora em shared_memory) retorna o path em sim mesmo
+            if file_path:
+                logger.info("[Episodic] Session saved to %s", file_path)
             last_saved_payload = payload
-
-        if sync_mem0 and payload != last_synced_payload:
-            try:
-                await mem0_client.add(messages, user_id=user_id)
-                last_synced_payload = payload
-                logger.info("[Mem0] %s messages synchronized.", len(messages))
-            except Exception as exc:
-                logger.warning("[Mem0] Synchronization failed: %s", exc)
 
     async def metrics_publisher() -> None:
         while True:
