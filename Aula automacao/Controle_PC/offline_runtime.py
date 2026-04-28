@@ -28,10 +28,9 @@ from faster_whisper import WhisperModel
 from openai import OpenAI
 
 from automacao_cortana import CortanaControl
-from cloud_memory_sync import sync_mem0_to_shared
 from face_auth import FaceAuthManager
 from offline_prompts import OFFLINE_SYSTEM_PROMPT
-from shared_memory import shared_memory
+from obsidian_memory import obsidian_memory as shared_memory
 
 LOGGER = logging.getLogger("cortana.offline")
 BASE_DIR = Path(__file__).resolve().parent
@@ -1000,8 +999,9 @@ class OfflineCortanaApp:
     def _memory_context(self) -> str:
         return shared_memory.build_context_block(self.user_id, fact_limit=15, episode_limit=3)
 
-    def sync_online_memory(self) -> dict[str, int]:
-        return asyncio.run(sync_mem0_to_shared(self.user_id))
+    def rebuild_semantic_index(self) -> dict[str, int]:
+        """Recompila o indice semantico do Obsidian Vault (embeddings de Fatos e Episodios)."""
+        return shared_memory.reconcile_index(self.user_id)
 
     def _system_message(self) -> dict[str, str]:
         context = self._memory_context()

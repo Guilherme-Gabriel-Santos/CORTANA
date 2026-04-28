@@ -1,4 +1,3 @@
-api keys.txt
 .openclaude-profile.json
 
 # Secrets
@@ -34,8 +33,6 @@ Aula automacao/Controle_PC/whatsapp_api_node/baileys_store.json
 Aula automacao/Controle_PC/whatsapp_api_node/auth_info_baileys/
 Aula automacao/Controle_PC/whatsapp_api_node/node_modules/
 Aula automacao/Controle_PC/kira_wpp/kira_session/
-backup_wpp_v1_legacy/kira_wpp/kira_session/
-kira-v3/__pycache__/
 Layout Cortana/agent-starter-react-main/.env.local
 Audit_Reports/
 Obsidian_Vault/

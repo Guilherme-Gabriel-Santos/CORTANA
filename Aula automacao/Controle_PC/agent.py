@@ -19,16 +19,20 @@ from dotenv import load_dotenv
 from livekit import agents
 from livekit.agents import Agent, AgentSession, ChatContext, RoomInputOptions, llm
 from livekit.plugins import google, noise_cancellation
-from mem0 import AsyncMemoryClient
 
-from cloud_memory_sync import sync_mem0_to_shared
 from face_auth import FaceAuthManager
 import whatsapp_bridge as whatsapp_bridge
 from automacao_cortana import CortanaControl
-from cyber_audit import CyberSentry
+# CyberSentry: importacao deferida para economizar RAM no startup (~6 MB)
+# A instancia sera criada na primeira vez que uma tool de auditoria for chamada.
 from prompts import AGENT_INSTRUCTION, SESSION_INSTRUCTION
-from obsidian_memory import obsidian_memory as shared_memory
-from whatsapp_runtime import get_whatsapp_status, send_whatsapp_message
+from obsidian_memory import obsidian_memory
+from whatsapp_runtime import (
+    get_whatsapp_status,
+    send_whatsapp_message,
+    save_whatsapp_contact,
+    list_whatsapp_contacts,
+)
 
 try:
     from playwright.async_api import async_playwright
@@ -265,7 +269,7 @@ async def _load_user_memories(user_id: str) -> str:
     sections: list[str] = []
     
     logger.info("[Obsidian_Vault] Loading local memories for '%s'...", user_id)
-    local_context = shared_memory.build_context_block(user_id, fact_limit=12, episode_limit=2)
+    local_context = obsidian_memory.build_context_block(user_id, fact_limit=12, episode_limit=2)
     if local_context:
         sections.append(local_context)
 
@@ -312,7 +316,8 @@ class Assistant(Agent, llm.ToolContext):
             chat_ctx=chat_ctx or ChatContext(),
         )
         self.cortana_control = CortanaControl()
-        self._cyber_sentry = CyberSentry(headed=True)
+        # CyberSentry: lazy — so instancia quando a primeira tool de auditoria for chamada
+        self._cyber_sentry_instance = None
         self._session = session
         self._last_whatsapp_contact: str | None = None
         self._last_whatsapp_message: str | None = None
@@ -321,6 +326,14 @@ class Assistant(Agent, llm.ToolContext):
         self._last_whatsapp_notif: dict[str, float] = {}
         self._game_mode = False
         self._face_auth = face_auth
+
+    @property
+    def _cyber_sentry(self):
+        """Lazy-loader do modulo pentest. Importa cyber_audit so no primeiro uso."""
+        if self._cyber_sentry_instance is None:
+            from cyber_audit import CyberSentry  # importacao deferida
+            self._cyber_sentry_instance = CyberSentry(headed=True)
+        return self._cyber_sentry_instance
 
     def _require_face_auth(self) -> str | None:
         if not self._face_auth or not self._face_auth.enabled:
@@ -704,25 +717,48 @@ class Assistant(Agent, llm.ToolContext):
         return "Conectado" if response.get("connected") else "Offline"
 
     @agents.function_tool
+    async def salvar_contato_whatsapp(self, nome: str, numero: str) -> str:
+        """Salva um apelido para um numero na agenda local da Cortana.
+        Use quando o usuario disser coisas como 'salva 11 98888 7777 como Joao'
+        ou 'anota o numero da minha mae: 11 99999 8888'.
+        """
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+        nome = (nome or "").strip()
+        numero = (numero or "").strip()
+        if not nome or not numero:
+            return "Preciso do nome e do numero."
+        result = await save_whatsapp_contact(nome, numero)
+        if result.get("success"):
+            return f"Contato '{nome}' salvo ({result.get('number')})."
+        return f"Erro ao salvar: {result.get('message')}"
+
+    @agents.function_tool
+    async def listar_contatos_whatsapp(self) -> str:
+        """Lista os apelidos salvos na agenda local da Cortana."""
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+        data = await list_whatsapp_contacts()
+        aliases = data.get("aliases") or {}
+        if not aliases:
+            return "Nenhum contato salvo na agenda local."
+        linhas = [f"{nome}: {num}" for nome, num in aliases.items()]
+        return "Contatos salvos:\n" + "\n".join(linhas)
+
+    @agents.function_tool
     async def aprender_fato(self, fato: str) -> str:
         auth_error = self._require_face_auth()
         if auth_error:
             return auth_error
         if not fato.strip():
             return "Nada para memorizar."
-        local_saved = shared_memory.add_fact(DEFAULT_USER_ID, fato, source="online")
-        try:
-            mem0_client = AsyncMemoryClient()
-            await mem0_client.add([{"role": "user", "content": fato}], user_id=DEFAULT_USER_ID)
-            logger.info("[Mem0] Learned new fact for %s.", DEFAULT_USER_ID)
-            if local_saved:
-                return f"Fato memorizado na memoria compartilhada e sincronizado: '{fato}'"
-            return f"Fato atualizado e sincronizado: '{fato}'"
-        except Exception as exc:
-            if local_saved:
-                logger.warning("[Mem0] Fact saved only in shared memory: %s", exc)
-                return f"Fato memorizado localmente: '{fato}'. A sincronizacao online falhou: {exc}"
-            return f"Erro ao memorizar fato: {exc}"
+        saved = obsidian_memory.add_fact(DEFAULT_USER_ID, fato, source="online")
+        if saved:
+            logger.info("[Obsidian] Fato indexado para %s.", DEFAULT_USER_ID)
+            return f"Fato memorizado no Obsidian Vault: '{fato}'"
+        return f"Ja existe um fato identico registrado: '{fato}'"
 
     @agents.function_tool
     async def pesquisar_no_passado(self, termo: str) -> str:
@@ -730,8 +766,8 @@ class Assistant(Agent, llm.ToolContext):
         if auth_error:
             return auth_error
         try:
-            fact_matches = shared_memory.search_facts(DEFAULT_USER_ID, termo, limit=4)
-            episode_matches = shared_memory.search_episodes(DEFAULT_USER_ID, termo, limit=4)
+            fact_matches = obsidian_memory.search_facts(DEFAULT_USER_ID, termo, limit=4)
+            episode_matches = obsidian_memory.search_episodes(DEFAULT_USER_ID, termo, limit=4)
 
             sections: list[str] = []
             if fact_matches:
@@ -746,6 +782,23 @@ class Assistant(Agent, llm.ToolContext):
             return "Encontrei isto no meu passado:\n\n" + "\n\n".join(sections)
         except Exception as exc:
             return f"Erro na pesquisa local: {exc}"
+
+    @agents.function_tool
+    async def reconstruir_memoria_semantica(self) -> str:
+        """Reindexa todos os Fatos e Episodios do Obsidian Vault no banco semantico."""
+        auth_error = self._require_face_auth()
+        if auth_error:
+            return auth_error
+        try:
+            counts = obsidian_memory.reconcile_index(DEFAULT_USER_ID)
+            return (
+                "Indice semantico atualizado, chefe. "
+                f"Fatos: {counts.get('facts_indexed', 0)}, "
+                f"Episodios: {counts.get('episodes_indexed', 0)}, "
+                f"Pulados: {counts.get('skipped', 0)}."
+            )
+        except Exception as exc:
+            return f"Falhei reconstruindo o indice semantico: {exc}"
 
     @agents.function_tool
     async def modo_game(self, ativar: bool) -> str:
@@ -1148,7 +1201,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
                 messages.append({"role": role, "content": content})
         return messages
 
-    async def save_session_memory(sync_mem0: bool = False) -> None:
+    async def save_session_memory() -> None:
         nonlocal last_saved_payload, last_synced_payload
 
         messages = _session_messages()
@@ -1158,7 +1211,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         payload = json.dumps(messages, ensure_ascii=False)
         if payload != last_saved_payload:
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            file_path = shared_memory.save_episode(
+            file_path = obsidian_memory.save_episode(
                 user_id,
                 messages,
                 source="online",
@@ -1194,7 +1247,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
     async def periodic_autosave() -> None:
         while True:
             await asyncio.sleep(300)
-            await save_session_memory(sync_mem0=False)
+            await save_session_memory()
             logger.info("[AutoSave] Episodic memory updated.")
 
     metrics_task = asyncio.create_task(metrics_publisher())
@@ -1253,7 +1306,7 @@ async def entrypoint(ctx: agents.JobContext) -> None:
         for task in active_tasks:
             task.cancel()
 
-        await save_session_memory(sync_mem0=True)
+        await save_session_memory()
 
         for task in active_tasks:
             try:

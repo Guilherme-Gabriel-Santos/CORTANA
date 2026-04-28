@@ -9,12 +9,10 @@ import threading
 import urllib.parse
 from pathlib import Path
 
-import screen_brightness_control as sbc
-import spotipy
+# Imports pesados sao carregados sob demanda dentro dos metodos que os usam
+# para reduzir a RAM do startup (spotipy ~4.8 MB, pycaw + wakeonlan + sbc juntos ~3-5 MB).
+# Mantemos apenas os leves no topo.
 from dotenv import load_dotenv
-from pycaw.pycaw import AudioUtilities
-from spotipy.oauth2 import SpotifyOAuth
-from wakeonlan import send_magic_packet
 
 load_dotenv(override=True)
 
@@ -284,6 +282,7 @@ class CortanaControl:
         try:
             level = max(0, min(100, int(nivel)))
             import comtypes
+            from pycaw.pycaw import AudioUtilities
 
             comtypes.CoInitialize()
             devices = AudioUtilities.GetSpeakers()
@@ -296,6 +295,7 @@ class CortanaControl:
     def controle_brilho(self, nivel: int) -> str:
         try:
             level = max(0, min(100, int(nivel)))
+            import screen_brightness_control as sbc
             sbc.set_brightness(level)
             return f"Brilho ajustado para {level}%."
         except Exception as exc:
@@ -341,6 +341,8 @@ class CortanaControl:
 
             if client_id and client_secret:
                 try:
+                    import spotipy
+                    from spotipy.oauth2 import SpotifyOAuth
                     spotify = spotipy.Spotify(
                         auth_manager=SpotifyOAuth(
                             client_id=client_id,
@@ -441,6 +443,7 @@ class CortanaControl:
 
     def wake_on_lan(self, mac_address: str) -> str:
         try:
+            from wakeonlan import send_magic_packet
             send_magic_packet(mac_address)
             return f"Pacote Wake-on-LAN enviado para {mac_address}."
         except Exception as exc:

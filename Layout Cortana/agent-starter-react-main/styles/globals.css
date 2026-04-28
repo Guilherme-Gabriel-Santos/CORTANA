@@ -80,6 +80,25 @@
   --font-mono:
     var(--font-commit-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     'Liberation Mono', 'Courier New', monospace;
+  --font-orbitron: var(--font-orbitron);
+  --font-rajdhani: var(--font-rajdhani);
+  --font-jetbrains: var(--font-jetbrains-mono);
+
+  /* HUD palette */
+  --hud-cyan: #00d4ff;
+  --hud-electric: #7df9ff;
+  --hud-purple: #bc13fe;
+  --hud-purple-soft: #9a4de8;
+  --hud-purple-deep: #5a1a9e;
+  --hud-green: #39ff14;
+  --hud-red: #ff4757;
+  --hud-amber: #ffb84d;
+  --hud-bg-0: #05050a;
+  --hud-bg-1: #0a0a15;
+  --hud-panel-border: rgba(0, 212, 255, 0.25);
+  --hud-panel-border-alt: rgba(188, 19, 254, 0.35);
+  --hud-cyan-glow: rgba(0, 212, 255, 0.5);
+  --hud-purple-glow: rgba(188, 19, 254, 0.5);
 
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -162,4 +181,127 @@
   .glow-icon {
     filter: drop-shadow(0 0 8px rgba(188, 19, 254, 0.6));
   }
+
+  /* ==== HUD overlays & panels ==== */
+  .hud-root {
+    background:
+      radial-gradient(ellipse at 20% 10%, rgba(188, 19, 254, 0.08), transparent 50%),
+      radial-gradient(ellipse at 80% 90%, rgba(0, 212, 255, 0.06), transparent 50%),
+      #05050a;
+    color: #e8f4ff;
+  }
+
+  .hud-scanlines {
+    position: fixed; inset: 0; pointer-events: none; z-index: 40;
+    background:
+      repeating-linear-gradient(0deg,
+        rgba(0, 212, 255, 0.035) 0px, rgba(0, 212, 255, 0.035) 1px,
+        transparent 1px, transparent 3px),
+      repeating-linear-gradient(90deg,
+        rgba(188, 19, 254, 0.025) 0px, rgba(188, 19, 254, 0.025) 1px,
+        transparent 1px, transparent 3px);
+    mix-blend-mode: overlay;
+  }
+
+  .hud-vignette {
+    position: fixed; inset: 0; pointer-events: none; z-index: 45;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0, 0, 0, 0.75) 100%);
+  }
+
+  .hud-sweep {
+    position: fixed; left: 0; right: 0; height: 100px; pointer-events: none; z-index: 41;
+    background: linear-gradient(180deg, transparent, rgba(0, 212, 255, 0.05), transparent);
+    animation: hud-sweep 9s linear infinite;
+  }
+  @keyframes hud-sweep {
+    0%   { top: -120px; }
+    100% { top: 110vh; }
+  }
+
+  @keyframes hud-pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.4; transform: scale(1.35); }
+  }
+
+  /* Painel HUD: borda cyan + glow */
+  .hud-panel {
+    position: relative;
+    background: linear-gradient(180deg, rgba(5, 20, 35, 0.55), rgba(10, 0, 30, 0.55));
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--hud-panel-border);
+    box-shadow: 0 0 18px rgba(0, 212, 255, 0.08), inset 0 0 18px rgba(0, 212, 255, 0.05);
+    border-radius: 2px;
+  }
+  .hud-panel.purple {
+    border-color: var(--hud-panel-border-alt);
+    box-shadow: 0 0 18px rgba(188, 19, 254, 0.12), inset 0 0 18px rgba(188, 19, 254, 0.06);
+  }
+
+  .hud-panel-title {
+    font-family: var(--font-orbitron), sans-serif;
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--hud-panel-border);
+    color: var(--hud-cyan);
+    text-shadow: 0 0 6px var(--hud-cyan-glow);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .hud-panel.purple > .hud-panel-title {
+    color: var(--hud-purple);
+    border-bottom-color: var(--hud-panel-border-alt);
+    text-shadow: 0 0 6px var(--hud-purple-glow);
+  }
+
+  .hud-panel-body { padding: 12px; }
+
+  /* Barra de progresso HUD */
+  .hud-bar {
+    position: relative;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(0, 212, 255, 0.15);
+    overflow: hidden;
+  }
+  .hud-bar-fill {
+    position: absolute; top: 0; left: 0; bottom: 0;
+    background: linear-gradient(90deg, var(--hud-cyan), var(--hud-electric));
+    box-shadow: 0 0 10px var(--hud-cyan-glow);
+    transition: width 0.5s ease-out;
+  }
+  .hud-bar-fill.purple {
+    background: linear-gradient(90deg, var(--hud-purple-deep), var(--hud-purple));
+    box-shadow: 0 0 10px var(--hud-purple-glow);
+  }
+  .hud-bar-fill.warn {
+    background: linear-gradient(90deg, var(--hud-amber), #ff9500);
+    box-shadow: 0 0 10px rgba(255, 184, 77, 0.6);
+  }
+
+  /* Pulse dot */
+  .hud-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--hud-green); box-shadow: 0 0 8px var(--hud-green);
+    animation: hud-pulse 1.5s infinite;
+  }
+
+  /* Scrollbar customizada */
+  .hud-scroll::-webkit-scrollbar { width: 4px; }
+  .hud-scroll::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.25); }
+  .hud-scroll::-webkit-scrollbar-thumb {
+    background: rgba(0, 212, 255, 0.35); border-radius: 2px;
+  }
+  .hud-scroll::-webkit-scrollbar-thumb:hover {
+    background: rgba(188, 19, 254, 0.45);
+  }
+
+  /* Tipografia HUD */
+  .font-orbitron { font-family: var(--font-orbitron), sans-serif; }
+  .font-rajdhani { font-family: var(--font-rajdhani), sans-serif; }
+  .font-hud-mono { font-family: var(--font-jetbrains-mono), ui-monospace, monospace; }
 }

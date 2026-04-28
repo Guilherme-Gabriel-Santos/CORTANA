@@ -221,6 +221,19 @@ TECH_SIGNATURES: dict[str, list[str]] = {
 
 SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
 
+# CDNs de terceiros cujos sourcemaps e secrets têm risco limitado para o alvo auditado
+THIRD_PARTY_CDN_HOSTS = (
+    "framerusercontent.com",
+    "cloudflare.com",
+    "cdn.jsdelivr.net",
+    "unpkg.com",
+    "cdnjs.cloudflare.com",
+    "static.cloudflareinsights.com",
+    "assets.vercel.com",
+    "cdn.segment.com",
+    "cdn.amplitude.com",
+)
+
 
 @dataclass
 class Finding:
@@ -266,7 +279,20 @@ class AuditResult:
     def add(self, finding: Finding) -> None:
         self.findings.append(finding)
 
+    def deduplicate_findings(self) -> None:
+        """Remove findings duplicados: mesma categoria + mesmo título + mesma evidência."""
+        seen: set[str] = set()
+        unique: list[Finding] = []
+        for f in self.findings:
+            # Chave de deduplicação: categoria + título + primeiros 120 chars da evidência
+            key = f"{f.category}||{f.title}||{f.evidence[:120]}"
+            if key not in seen:
+                seen.add(key)
+                unique.append(f)
+        self.findings = unique
+
     def sorted_findings(self) -> list[Finding]:
+        self.deduplicate_findings()
         return sorted(self.findings, key=lambda f: SEVERITY_ORDER.get(f.severity, 99))
 
 
@@ -673,32 +699,86 @@ class CyberSentry:
                     )
                 )
 
+                # Arquivos INFO (robots.txt, sitemap.xml, security.txt) são
+                # publicamente intencionais — não devem ser chamados de "vazamento grave"
+                if severity == "INFO":
+                    finding_title = title
+                    finding_desc = (
+                        f"O arquivo `{path}` está publicamente acessível. "
+                        f"Arquivos como `robots.txt` e `sitemap.xml` são frequentemente "
+                        f"intencionais e necessários para SEO — avaliar se o conteúdo exposto "
+                        f"revela informações sensíveis no contexto específico deste alvo."
+                    )
+                    finding_category = "Reconhecimento — Arquivo Público"
+                else:
+                    finding_title = f"Vazamento grave: {title}"
+                    finding_desc = (
+                        f"O diretório ou arquivo `{path}` sigiloso foi detectado exposto "
+                        f"à internet de forma pública, o que burla as barreiras do sistema da empresa."
+                    )
+                    finding_category = "Arquivos Sensíveis e Vazamentos de Dados (Data Leak)"
+
                 result.add(Finding(
                     severity=severity,
-                    category="Arquivos Sensíveis e Vazamentos de Dados (Data Leak)",
-                    title=f"Vazamento grave: {title}",
-                    description=f"O diretório ou arquivo `{path}` sigiloso foi detectado exposto à internet de forma pública, o que burla as barreiras do sistema da empresa.",
+                    category=finding_category,
+                    title=finding_title,
+                    description=finding_desc,
                     attack_scenario=vuln_impact,
                     evidence=f"URL: `{probe_url}`\nStatus: `{resp.status_code}`\nTamanho: `{len(resp.content)}` bytes\n\nSnippet Visto:\n```\n{body_snippet[:200]}\n```",
                     remediation=f"Restringir privilégios HTTP publicamente sobre arquivos críticos do workspace e blindar a raiz web bloqueando requisições direta para `{path}` no servidor.",
                 ))
             await asyncio.sleep(0.15)
 
+        # Agrupa sourcemaps de CDNs terceiros para evitar spam de findings
+        third_party_sourcemap_cdns: set[str] = set()
+
         for js_url in result.js_assets[:30]:
             map_url = js_url + ".map"
             try:
+                map_host = urlparse(map_url).netloc
+                is_third_party = any(cdn in map_host for cdn in THIRD_PARTY_CDN_HOSTS)
+
                 resp = session.head(map_url, timeout=5, verify=False, allow_redirects=False)
                 if resp.status_code == 200:
                     result.sensitive_files.append({"path": map_url, "status": 200, "size": int(resp.headers.get("content-length", 0)), "type": "sourcemap"})
-                    result.add(Finding(
-                        severity="HIGH",
-                        category="Sourcemaps e Engenharia Reversa",
-                        title="Sourcemap JavaScript altamente exposto",
-                        description=f"O sourcemap `{map_url}` está publicamente disponível e serve como um mapa para reverter a ofuscação do código.",
-                        attack_scenario="Atacantes qualificados rastreiam o Front-end e realizam engenharia reversa perfeitamente em horas em busca de falhas invisíveis em lógicas obscuras na regra de negócio; lendo o código que deveria estar ofuscado como se vissem a máquina do Dev.",
-                        evidence=f"O URL rastreado que retornou os diagramas do código foi:\n`{map_url}`",
-                        remediation="Desativar `source-maps` do processo de build de produção (`npm run build`).",
-                    ))
+
+                    if is_third_party:
+                        # Agrupa por CDN — apenas 1 finding por plataforma terceira
+                        if map_host not in third_party_sourcemap_cdns:
+                            third_party_sourcemap_cdns.add(map_host)
+                            result.add(Finding(
+                                severity="INFO",
+                                category="Sourcemaps — CDN Terceiro",
+                                title=f"Sourcemaps expostos em CDN de terceiro: {map_host}",
+                                description=(
+                                    f"Sourcemaps JavaScript detectados no CDN `{map_host}`, que é uma "
+                                    f"plataforma externa (não controlada diretamente pelo alvo). "
+                                    f"Podem expor lógica de componentes da plataforma, mas geralmente "
+                                    f"não constituem vulnerabilidade direta do alvo."
+                                ),
+                                attack_scenario=(
+                                    "Risco limitado: expõe código da plataforma de terceiros, não do "
+                                    "negócio. Útil para reconhecimento de componentes usados, mas "
+                                    "dificilmente reportável em bug bounty como achado do alvo."
+                                ),
+                                evidence=f"Exemplo de sourcemap encontrado: `{map_url}`",
+                                remediation=(
+                                    f"Desativar source-maps nas configurações de build da plataforma "
+                                    f"(ex: Framer, Vercel). Verificar se o CDN de terceiro tem opção "
+                                    f"de desabilitar sourcemaps."
+                                ),
+                            ))
+                    else:
+                        # Sourcemap no próprio domínio do alvo — HIGH legítimo
+                        result.add(Finding(
+                            severity="HIGH",
+                            category="Sourcemaps e Engenharia Reversa",
+                            title="Sourcemap JavaScript exposto no domínio do alvo",
+                            description=f"O sourcemap `{map_url}` está publicamente disponível e serve como um mapa para reverter a ofuscação do código do próprio alvo.",
+                            attack_scenario="Atacantes realizam engenharia reversa do código do negócio em horas, expondo lógicas de autenticação, validação e regras internas que deveriam estar ofuscadas em produção.",
+                            evidence=f"Sourcemap acessível no domínio do próprio alvo:\n`{map_url}`",
+                            remediation="Desativar `source-maps` no processo de build de produção (`npm run build` ou equivalente).",
+                        ))
             except Exception:
                 pass
         session.close()
@@ -904,16 +984,39 @@ class CyberSentry:
                     remediation="Validar origens no servidor e nunca refletir Origin arbitrário.",
                 ))
 
-            # JS Secrets
+            # JS Secrets — com deduplicação por (tipo, valor)
             if callback:
                 await callback("🔑 Extraindo segredos do JavaScript...")
             js_findings = await extract_js_secrets(result.js_assets, callback=callback)
+            seen_secrets: set[str] = set()
             for f in js_findings:
+                # Chave de dedup: tipo + primeiros 40 chars do valor encontrado
+                evidence_text = f.get("evidence", "")
+                secret_key = f"{f.get('subtype', '')}||{evidence_text[:40]}"
+                if secret_key in seen_secrets:
+                    continue
+                seen_secrets.add(secret_key)
                 result.js_secrets.append(f)
+
+                # Detectar se o secret está em arquivo de CDN terceiro
+                cdn_note = ""
+                try:
+                    url_match = re.search(r"https?://\S+", evidence_text)
+                    if url_match:
+                        secret_host = urlparse(url_match.group(0).rstrip(":")).netloc
+                        if any(cdn in secret_host for cdn in THIRD_PARTY_CDN_HOSTS):
+                            cdn_note = (
+                                f"\n\n⚠️ **Nota:** Token encontrado em arquivo hospedado no CDN "
+                                f"de terceiro (`{secret_host}`). Verificar se pertence ao alvo "
+                                f"antes de reportar — pode ser credencial da plataforma, não do negócio."
+                            )
+                except Exception:
+                    pass
+
                 result.add(Finding(
                     severity=f["severity"], category="OWASP — JS Secrets",
                     title=f"Segredo JS: {f.get('subtype', '')}",
-                    description=f.get("evidence", ""),
+                    description=f.get("evidence", "") + cdn_note,
                     attack_scenario=f.get("attack_scenario", ""),
                     remediation="Remover chaves e tokens do código JavaScript. Usar variáveis de ambiente no backend.",
                 ))
@@ -944,6 +1047,86 @@ class CyberSentry:
 
         except Exception as exc:
             logger.warning("[CyberSentry] OWASP phase error: %s", exc)
+
+        # === FASE 9: Exploração Ativa ===
+        if callback:
+            await callback("💥 Fase 9/9 — Exploração ativa (Auth Bypass, IDOR, Rate Limit, JWT, User Enum)...")
+        try:
+            from cyber_exploit import (
+                test_api_auth_bypass,
+                test_idor_active,
+                test_rate_limiting,
+                test_user_enumeration,
+                test_jwt_weaknesses,
+            )
+
+            # Auth Bypass
+            auth_bypass_findings = await test_api_auth_bypass(result.api_endpoints, callback=callback)
+            for f in auth_bypass_findings:
+                result.add(Finding(
+                    severity=f["severity"],
+                    category="Exploração — API Auth Bypass",
+                    title=f"Auth Bypass ({f.get('subtype', '')}) em `{urlparse(f.get('url', '')).path}`",
+                    description=f"Endpoint respondeu com HTTP {f.get('status_code')} sem credencial válida.",
+                    attack_scenario=f.get("attack_scenario", ""),
+                    evidence=f.get("evidence", ""),
+                    remediation="Validar Authorization header no servidor antes de processar qualquer requisição. Retornar 401 para tokens ausentes/inválidos.",
+                ))
+
+            # IDOR Ativo
+            idor_findings = await test_idor_active(result.routes, callback=callback)
+            for f in idor_findings:
+                result.add(Finding(
+                    severity=f["severity"],
+                    category="Exploração — IDOR",
+                    title=f"IDOR: acesso com ID `{f.get('tested_id')}` retornou HTTP 200",
+                    description=f"URL original `{f.get('original_url')}` com ID `{f.get('original_id')}` substituído por `{f.get('tested_id')}` retornou dados.",
+                    attack_scenario=f.get("attack_scenario", ""),
+                    evidence=f.get("evidence", ""),
+                    remediation="Verificar no backend se o recurso solicitado pertence ao usuário autenticado antes de retornar dados.",
+                ))
+
+            # Rate Limiting
+            rate_findings = await test_rate_limiting(result.api_endpoints, callback=callback)
+            for f in rate_findings:
+                result.add(Finding(
+                    severity=f["severity"],
+                    category="Exploração — Rate Limiting",
+                    title=f"Rate limiting ausente em `{urlparse(f.get('url', '')).path}`",
+                    description=f"{f.get('requests_sent')} requisições enviadas sem throttling.",
+                    attack_scenario=f.get("attack_scenario", ""),
+                    evidence=f.get("evidence", ""),
+                    remediation="Implementar rate limiting (ex: 10 req/min por IP) em endpoints sensíveis. Usar ferramentas como Nginx limit_req ou middleware dedicado.",
+                ))
+
+            # User Enumeration
+            enum_findings = await test_user_enumeration(result.forms, url, callback=callback)
+            for f in enum_findings:
+                result.add(Finding(
+                    severity=f["severity"],
+                    category="Exploração — User Enumeration",
+                    title=f"Enumeração de usuários em `{urlparse(f.get('url', '')).path}`",
+                    description="Resposta diferente para usuário válido vs inválido.",
+                    attack_scenario=f.get("attack_scenario", ""),
+                    evidence=f.get("evidence", ""),
+                    remediation="Retornar sempre a mesma mensagem genérica independente se o e-mail existe ou não. Igualar tempo de resposta com hash dummy.",
+                ))
+
+            # JWT Weaknesses
+            jwt_findings = await test_jwt_weaknesses(result.api_endpoints, callback=callback)
+            for f in jwt_findings:
+                result.add(Finding(
+                    severity=f["severity"],
+                    category="Exploração — JWT",
+                    title=f"JWT Weakness ({f.get('subtype', '')}) aceito pelo servidor",
+                    description=f"Servidor aceitou JWT forjado com `{f.get('subtype', '')}`.",
+                    attack_scenario=f.get("attack_scenario", ""),
+                    evidence=f.get("evidence", ""),
+                    remediation="Validar o algoritmo JWT no servidor (rejeitar alg:none). Usar bibliotecas atualizadas e chave secreta forte (>256 bits).",
+                ))
+
+        except Exception as exc:
+            logger.warning("[CyberSentry] Exploit phase error: %s", exc)
 
         # === FINALIZAÇÃO ===
         result.finished_at = datetime.now(timezone.utc).isoformat()

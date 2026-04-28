@@ -1,4 +1,4 @@
-import { Public_Sans } from 'next/font/google';
+import { Public_Sans, Orbitron, Rajdhani, JetBrains_Mono } from 'next/font/google';
 import localFont from 'next/font/local';
 import { headers } from 'next/headers';
 import { ThemeProvider } from '@/components/app/theme-provider';
@@ -10,6 +10,27 @@ import '@/styles/globals.css';
 const publicSans = Public_Sans({
   variable: '--font-public-sans',
   subsets: ['latin'],
+});
+
+const orbitron = Orbitron({
+  variable: '--font-orbitron',
+  subsets: ['latin'],
+  weight: ['400', '600', '700', '900'],
+  display: 'swap',
+});
+
+const rajdhani = Rajdhani({
+  variable: '--font-rajdhani',
+  subsets: ['latin'],
+  weight: ['300', '400', '500', '600', '700'],
+  display: 'swap',
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  variable: '--font-jetbrains-mono',
+  subsets: ['latin'],
+  weight: ['400', '500', '700'],
+  display: 'swap',
 });
 
 const commitMono = localFont({
@@ -56,6 +77,9 @@ export default async function RootLayout({ children }: RootLayoutProps) {
       className={cn(
         publicSans.variable,
         commitMono.variable,
+        orbitron.variable,
+        rajdhani.variable,
+        jetbrainsMono.variable,
         'scroll-smooth font-sans antialiased'
       )}
     >

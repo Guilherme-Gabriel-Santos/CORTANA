@@ -9,7 +9,7 @@ from typing import Any, Callable
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from offline_runtime import OfflineCortanaApp, _load_environment
-from shared_memory import DB_PATH
+from obsidian_memory import VAULT_DIR as MEMORY_PATH
 
 
 LOGGER = logging.getLogger("cortana.offline.desktop")
@@ -141,7 +141,7 @@ class CortanaOfflineWindow(QtWidgets.QMainWindow):
         chip_row.setSpacing(10)
         self.model_chip = QtWidgets.QLabel(f"Modelo local  {self.backend.model_name}")
         self.voice_chip = QtWidgets.QLabel("Voz  carregando")
-        self.memory_chip = QtWidgets.QLabel(f"Memoria  {Path(DB_PATH).as_posix()}")
+        self.memory_chip = QtWidgets.QLabel(f"Memoria  {Path(MEMORY_PATH).as_posix()}")
         for chip in (self.model_chip, self.voice_chip, self.memory_chip):
             chip.setObjectName("chip")
             chip_row.addWidget(chip)
@@ -228,11 +228,11 @@ class CortanaOfflineWindow(QtWidgets.QMainWindow):
         runtime_layout.setSpacing(10)
         runtime_title = QtWidgets.QLabel("Sessao")
         runtime_title.setObjectName("railTitle")
-        runtime_desc = QtWidgets.QLabel("Sincronize a memoria da online e acompanhe o estado do runtime local.")
+        runtime_desc = QtWidgets.QLabel("Reconstrua o indice semantico do Obsidian Vault e acompanhe o runtime local.")
         runtime_desc.setObjectName("railText")
         runtime_desc.setWordWrap(True)
-        self.sync_button = QtWidgets.QPushButton("Importar memoria da online")
-        self.sync_button.clicked.connect(self.sync_online_memory)
+        self.sync_button = QtWidgets.QPushButton("Reconstruir memoria semantica")
+        self.sync_button.clicked.connect(self.rebuild_semantic_index)
         runtime_layout.addWidget(runtime_title)
         runtime_layout.addWidget(runtime_desc)
         runtime_layout.addWidget(self.sync_button)
@@ -552,15 +552,15 @@ class CortanaOfflineWindow(QtWidgets.QMainWindow):
             on_error_message="Falha ao iniciar a Cortana offline",
         )
 
-    def sync_online_memory(self) -> None:
+    def rebuild_semantic_index(self) -> None:
         self._start_worker(
-            self.backend.sync_online_memory,
+            self.backend.rebuild_semantic_index,
             on_success=lambda stats: self._append_system_message(
-                "Memoria online importada: "
-                f"{stats['fetched']} lidas, {stats['inserted']} novas, {stats['updated']} ja existentes."
+                "Indice semantico reconstruido: "
+                f"{stats.get('indexed', 0)} itens indexados, {stats.get('skipped', 0)} ignorados."
             ),
-            busy_message="Importando memoria da versao online...",
-            on_error_message="Falha ao importar a memoria da online",
+            busy_message="Reindexando o Obsidian Vault...",
+            on_error_message="Falha ao reconstruir o indice semantico",
         )
 
     def send_text(self) -> None:

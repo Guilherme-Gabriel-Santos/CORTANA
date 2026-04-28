@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CORTANA HUD // Mockup</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Rajdhani:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg-0: #050810;
+    --bg-1: #0a0e1a;
+    --cyan: #00d4ff;
+    --cyan-dim: #0089a3;
+    --cyan-glow: rgba(0, 212, 255, 0.4);
+    --electric: #7df9ff;
+    --amber: #ffb84d;
+    --red: #ff4757;
+    --green: #00ff88;
+    --text-0: #e0f4ff;
+    --text-1: #8eb8cc;
+    --text-2: #5a7d8f;
+    --grid-line: rgba(0, 212, 255, 0.08);
+    --panel-border: rgba(0, 212, 255, 0.3);
+    --panel-bg: rgba(10, 20, 30, 0.7);
+  }
+
+  html, body { height: 100%; }
+  body {
+    background: var(--bg-0);
+    color: var(--text-0);
+    font-family: 'Rajdhani', sans-serif;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* Nebular background */
+  body::before {
+    content: ''; position: fixed; inset: 0; z-index: -3;
+    background:
+      radial-gradient(circle at 50% 40%, rgba(0, 212, 255, 0.10) 0%, transparent 55%),
+      radial-gradient(circle at 15% 85%, rgba(125, 249, 255, 0.06) 0%, transparent 40%),
+      radial-gradient(circle at 85% 15%, rgba(0, 212, 255, 0.06) 0%, transparent 40%),
+      var(--bg-0);
+  }
+
+  /* Hex grid (na real é square grid) com mask radial */
+  body::after {
+    content: ''; position: fixed; inset: 0; z-index: -2;
+    background-image:
+      linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 60px 60px;
+    mask-image: radial-gradient(ellipse at center, #000 30%, transparent 75%);
+    -webkit-mask-image: radial-gradient(ellipse at center, #000 30%, transparent 75%);
+  }
+
+  .scanlines {
+    position: fixed; inset: 0; pointer-events: none; z-index: 100;
+    background: repeating-linear-gradient(0deg,
+      transparent 0px, transparent 2px,
+      rgba(0, 212, 255, 0.03) 3px, rgba(0, 212, 255, 0.03) 3px);
+  }
+
+  .corner-brackets { position: fixed; inset: 14px; pointer-events: none; z-index: 99; }
+  .bracket { position: absolute; width: 36px; height: 36px; border: 2px solid var(--cyan); box-shadow: 0 0 12px var(--cyan-glow); }
+  .bracket.tl { top: 0; left: 0; border-right: none; border-bottom: none; }
+  .bracket.tr { top: 0; right: 0; border-left: none; border-bottom: none; }
+  .bracket.bl { bottom: 0; left: 0; border-right: none; border-top: none; }
+  .bracket.br { bottom: 0; right: 0; border-left: none; border-top: none; }
+
+  /* Top bar */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 40px 14px;
+    border-bottom: 1px solid var(--panel-border);
+    background: linear-gradient(180deg, rgba(0, 212, 255, 0.05), transparent);
+  }
+  .logo {
+    font-family: 'Orbitron', sans-serif; font-weight: 900; font-size: 24px;
+    letter-spacing: 8px; color: var(--cyan);
+    text-shadow: 0 0 18px var(--cyan-glow), 0 0 36px var(--cyan-glow);
+  }
+  .logo small { font-size: 10px; letter-spacing: 3px; opacity: 0.6; margin-left: 8px; }
+  .status-strip { display: flex; gap: 22px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-1); }
+  .status-strip .label { color: var(--text-2); margin-right: 6px; letter-spacing: 1px; }
+  .status-strip .value { color: var(--cyan); }
+  .pulse-dot {
+    display: inline-block; width: 8px; height: 8px; background: var(--green);
+    border-radius: 50%; box-shadow: 0 0 10px var(--green); margin-right: 6px;
+    animation: pulse 1.5s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(1.35); }
+  }
+
+  /* Grid principal */
+  .main {
+    display: grid;
+    grid-template-columns: 300px 1fr 300px;
+    grid-template-rows: 1fr auto auto;
+    gap: 18px 24px;
+    padding: 18px 40px 20px;
+    height: calc(100vh - 64px);
+    overflow: hidden;
+  }
+  .col-left, .col-right { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+  .center { display: flex; align-items: center; justify-content: center; }
+
+  /* Panel */
+  .panel {
+    background: var(--panel-bg); backdrop-filter: blur(8px);
+    border: 1px solid var(--panel-border);
+    padding: 12px 14px;
+    position: relative;
+  }
+  .panel::before, .panel::after {
+    content: ''; position: absolute; width: 12px; height: 12px;
+  }
+  .panel::before { top: -1px; left: -1px; border-top: 2px solid var(--cyan); border-left: 2px solid var(--cyan); }
+  .panel::after  { bottom: -1px; right: -1px; border-bottom: 2px solid var(--cyan); border-right: 2px solid var(--cyan); }
+
+  .panel-title {
+    font-family: 'Orbitron', sans-serif; font-size: 10px; font-weight: 700;
+    letter-spacing: 3px; color: var(--cyan); text-transform: uppercase;
+    margin-bottom: 10px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .panel-title::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, var(--cyan), transparent); }
+
+  /* Face ID */
+  .face-visual {
+    width: 100%; aspect-ratio: 1;
+    background: linear-gradient(135deg, #0a2030, #051520);
+    border: 1px solid var(--panel-border);
+    position: relative; overflow: hidden; margin-bottom: 10px;
+  }
+  .face-silhouette {
+    position: absolute; inset: 22%;
+    border: 2px solid var(--cyan);
+    border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
+    box-shadow: 0 0 22px var(--cyan-glow), inset 0 0 22px var(--cyan-glow);
+  }
+  .face-scan {
+    position: absolute; left: 0; right: 0; height: 2px;
+    background: var(--cyan); box-shadow: 0 0 12px var(--cyan);
+    animation: scan 3s ease-in-out infinite;
+  }
+  @keyframes scan {
+    0%, 100% { top: 10%; opacity: 0.2; }
+    50% { top: 88%; opacity: 1; }
+  }
+  .face-corner { position: absolute; width: 14px; height: 14px; border: 2px solid var(--cyan); }
+  .face-corner.tl { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+  .face-corner.tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
+  .face-corner.bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
+  .face-corner.br { bottom: 8px; right: 8px; border-left: none; border-top: none; }
+
+  .face-data { font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+  .face-data .row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed var(--grid-line); }
+  .face-data .k { color: var(--text-2); }
+  .face-data .v { color: var(--text-0); }
+  .face-data .v.ok { color: var(--green); }
+
+  /* Vitals */
+  .vitals-row { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+  .vitals-label { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-2); width: 32px; }
+  .vitals-bar { flex: 1; height: 8px; background: rgba(0, 212, 255, 0.1); border: 1px solid var(--panel-border); position: relative; }
+  .vitals-bar-fill {
+    position: absolute; top: 0; left: 0; bottom: 0;
+    background: linear-gradient(90deg, var(--cyan), var(--electric));
+    box-shadow: 0 0 8px var(--cyan-glow);
+    transition: width 0.6s ease;
+  }
+  .vitals-bar-fill.amber { background: linear-gradient(90deg, #ff9900, var(--amber)); box-shadow: 0 0 8px rgba(255,184,77,0.5); }
+  .vitals-bar-fill.red   { background: linear-gradient(90deg, #ff4757, #ff7a82); box-shadow: 0 0 8px rgba(255,71,87,0.5); }
+  .vitals-value { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--cyan); width: 48px; text-align: right; }
+
+  /* Memory stream */
+  .memory-stream { display: flex; flex-direction: column; gap: 5px; max-height: 240px; overflow: hidden; }
+  .memory-item {
+    padding: 6px 8px; border-left: 2px solid var(--cyan);
+    background: rgba(0, 212, 255, 0.04);
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    animation: stream-in 0.6s ease;
+  }
+  .memory-item .ts { color: var(--text-2); margin-right: 8px; font-size: 9px; }
+  .memory-item .content { color: var(--text-0); }
+  @keyframes stream-in {
+    from { opacity: 0; transform: translateX(-12px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+
+  /* Arc reactor */
+  .arc-reactor { position: relative; width: 380px; height: 380px; display: flex; align-items: center; justify-content: center; }
+  .arc-ring {
+    position: absolute; border-radius: 50%;
+    border: 1px solid var(--cyan);
+    box-shadow: 0 0 20px var(--cyan-glow), inset 0 0 20px var(--cyan-glow);
+  }
+  .arc-ring.outer { inset: 0; animation: rotate 30s linear infinite; }
+  .arc-ring.mid   { inset: 40px; border-style: dashed; animation: rotate 20s linear infinite reverse; }
+  .arc-ring.inner { inset: 90px; animation: rotate 15s linear infinite; }
+
+  @keyframes rotate {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  .arc-ticks {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    animation: rotate 90s linear infinite;
+    pointer-events: none;
+  }
+
+  .arc-core {
+    position: relative; width: 170px; height: 170px;
+    border-radius: 50%;
+    background: radial-gradient(circle, var(--electric) 0%, var(--cyan) 30%, rgba(0,100,140,0.3) 62%, transparent 82%);
+    box-shadow: 0 0 50px var(--cyan-glow), 0 0 100px var(--cyan-glow);
+    animation: reactor-pulse 2s ease-in-out infinite;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .arc-core-inner {
+    width: 60px; height: 60px; border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 0 36px #fff, 0 0 70px var(--electric);
+  }
+  @keyframes reactor-pulse {
+    0%, 100% { transform: scale(1); filter: brightness(1); }
+    50% { transform: scale(1.06); filter: brightness(1.22); }
+  }
+
+  .freq-bars { position: absolute; inset: 0; border-radius: 50%; animation: rotate 9s linear infinite; pointer-events: none; }
+  .freq-bar {
+    position: absolute; top: 50%; left: 50%;
+    width: 3px; background: var(--cyan);
+    box-shadow: 0 0 6px var(--cyan);
+    transform-origin: 50% 0;
+    transition: height 120ms linear, opacity 120ms linear;
+  }
+
+  .reactor-status {
+    position: absolute; bottom: -38px;
+    font-family: 'Orbitron', sans-serif; font-size: 11px;
+    letter-spacing: 5px; color: var(--cyan); text-transform: uppercase;
+    text-shadow: 0 0 10px var(--cyan-glow);
+  }
+  .reactor-mode {
+    position: absolute; top: -32px;
+    font-family: 'Rajdhani', sans-serif; font-weight: 300; font-size: 11px;
+    letter-spacing: 2px; color: var(--text-1); text-transform: uppercase;
+  }
+
+  /* WhatsApp */
+  .wpp-list { display: flex; flex-direction: column; gap: 7px; }
+  .wpp-item {
+    padding: 7px 9px; border: 1px solid var(--panel-border);
+    background: rgba(0, 212, 255, 0.04);
+    display: flex; align-items: center; gap: 9px;
+    transition: all 0.25s;
+  }
+  .wpp-item:hover {
+    background: rgba(0, 212, 255, 0.1);
+    box-shadow: 0 0 10px var(--cyan-glow);
+    transform: translateX(2px);
+  }
+  .wpp-avatar {
+    width: 30px; height: 30px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--cyan-dim), var(--electric));
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 11px; color: #002030;
+  }
+  .wpp-content { flex: 1; min-width: 0; }
+  .wpp-name { font-weight: 600; font-size: 13px; color: var(--text-0); }
+  .wpp-preview {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-1);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .wpp-badge {
+    background: var(--red); color: white;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 700;
+    padding: 2px 7px; border-radius: 10px;
+    box-shadow: 0 0 8px rgba(255, 71, 87, 0.6);
+  }
+
+  /* Bottom strip */
+  .bottom-strip {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: 1fr 1.4fr 1fr;
+    gap: 18px;
+  }
+
+  .now-playing { display: flex; align-items: center; gap: 12px; }
+  .vinyl {
+    width: 56px; height: 56px; border-radius: 50%;
+    background: radial-gradient(circle, #1a1a1a 40%, #000 100%);
+    border: 2px solid var(--cyan);
+    box-shadow: 0 0 14px var(--cyan-glow);
+    animation: rotate 4s linear infinite;
+    position: relative; flex-shrink: 0;
+  }
+  .vinyl::after { content: ''; position: absolute; inset: 40%; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+
+  .track-info .artist { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-2); }
+  .track-info .title { font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 14px; color: var(--text-0); }
+  .track-info .progress { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--cyan); margin-top: 3px; }
+
+  .cyber-console { font-family: 'JetBrains Mono', monospace; font-size: 10px; max-height: 110px; overflow: hidden; }
+  .cyber-line { color: var(--text-1); line-height: 1.55; }
+  .cyber-line.ok { color: var(--green); }
+  .cyber-line.warn { color: var(--amber); }
+  .cyber-line.err { color: var(--red); }
+
+  .qa-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+  .qa-btn {
+    background: transparent; border: 1px solid var(--panel-border);
+    color: var(--cyan); font-family: 'Rajdhani', sans-serif;
+    font-weight: 600; font-size: 11px; letter-spacing: 1.5px;
+    text-transform: uppercase; padding: 9px 12px; cursor: pointer;
+    transition: all 0.2s; position: relative;
+  }
+  .qa-btn:hover {
+    background: rgba(0, 212, 255, 0.1);
+    box-shadow: 0 0 12px var(--cyan-glow);
+    color: var(--electric);
+  }
+
+  /* Transcript */
+  .transcript {
+    grid-column: 1 / -1;
+    padding: 14px 40px;
+    margin: 0 -40px -20px;
+    border-top: 1px solid var(--panel-border);
+    background: linear-gradient(180deg, transparent, rgba(0, 212, 255, 0.05));
+  }
+  .transcript-line {
+    font-family: 'Rajdhani', sans-serif; font-size: 16px;
+    margin-bottom: 4px;
+  }
+  .transcript-line .who {
+    font-family: 'Orbitron', sans-serif; font-size: 10px; font-weight: 700;
+    letter-spacing: 2px; margin-right: 12px;
+  }
+  .transcript-line.user .who { color: var(--amber); }
+  .transcript-line.cortana .who { color: var(--cyan); text-shadow: 0 0 8px var(--cyan-glow); }
+  .transcript-line .said { color: var(--text-0); }
+
+  /* Sentry cam flutuante */
+  .cam-feed {
+    position: fixed; bottom: 24px; right: 24px;
+    width: 220px; aspect-ratio: 16/9;
+    background: #0a1020;
+    border: 1px solid var(--panel-border);
+    z-index: 90;
+    box-shadow: 0 0 18px rgba(0, 212, 255, 0.2);
+  }
+  .cam-feed .panel-title { position: absolute; top: 4px; left: 8px; margin: 0; font-size: 8px; }
+  .cam-feed::after {
+    content: '● REC'; position: absolute; top: 6px; right: 8px;
+    color: var(--red); font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; font-weight: 700; animation: pulse 1s infinite;
+  }
+  .cam-static {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse at 50% 100%, rgba(0,212,255,0.15), transparent 60%),
+      repeating-linear-gradient(0deg, rgba(0,212,255,0.04) 0, rgba(0,212,255,0.04) 1px, transparent 1px, transparent 3px);
+  }
+  .cam-motion {
+    position: absolute; inset: 30% 45% 15% 20%;
+    border: 1px dashed var(--cyan); opacity: 0.7;
+    animation: motion-box 3s ease-in-out infinite alternate;
+  }
+  .cam-motion::before {
+    content: 'MOTION'; position: absolute; top: -14px; left: 0;
+    font-family: 'JetBrains Mono', monospace; font-size: 8px; color: var(--cyan);
+  }
+  @keyframes motion-box {
+    0%   { inset: 30% 45% 15% 20%; }
+    100% { inset: 20% 20% 25% 45%; }
+  }
+
+  /* Scanline sweep geral */
+  .sweep {
+    position: fixed; left: 0; right: 0; height: 80px;
+    background: linear-gradient(180deg, transparent, rgba(0, 212, 255, 0.08), transparent);
+    pointer-events: none; z-index: 50;
+    animation: sweep 8s linear infinite;
+  }
+  @keyframes sweep {
+    0%   { top: -100px; }
+    100% { top: 100vh; }
+  }
+
+  /* Glitch sutil */
+  .glitch { animation: glitch 20s infinite; }
+  @keyframes glitch {
+    0%, 98%, 100% { transform: translate(0); filter: none; }
+    98.5% { transform: translate(-2px, 1px); filter: hue-rotate(30deg) saturate(1.5); }
+    99%   { transform: translate(2px, -1px); }
+  }
+
+  /* Vignette */
+  .vignette {
+    position: fixed; inset: 0; pointer-events: none; z-index: 80;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+  }
+</style>
+</head>
+<body>
+
+<div class="scanlines"></div>
+<div class="vignette"></div>
+<div class="sweep"></div>
+<div class="corner-brackets">
+  <div class="bracket tl"></div><div class="bracket tr"></div>
+  <div class="bracket bl"></div><div class="bracket br"></div>
+</div>
+
+<!-- TOP BAR -->
+<header class="topbar glitch">
+  <div class="logo">CORTANA<small>v2.0 // JARVIS-MODE</small></div>
+  <div class="status-strip">
+    <div><span class="label">MODEL</span><span class="value">gemini-2.5-flash-native</span></div>
+    <div><span class="label">USER</span><span class="value">Guilherme</span></div>
+    <div><span class="label">SESSION</span><span class="value" id="session-time">00:12:34</span></div>
+    <div><span class="pulse-dot"></span><span class="value">ONLINE</span></div>
+    <div><span class="label">BRT</span><span class="value" id="clock">--:--:--</span></div>
+  </div>
+</header>
+
+<!-- MAIN GRID -->
+<div class="main">
+
+  <!-- LEFT COLUMN -->
+  <div class="col-left">
+    <div class="panel">
+      <div class="panel-title">FACE ID</div>
+      <div class="face-visual">
+        <div class="face-corner tl"></div><div class="face-corner tr"></div>
+        <div class="face-corner bl"></div><div class="face-corner br"></div>
+        <div class="face-silhouette"></div>
+        <div class="face-scan"></div>
+      </div>
+      <div class="face-data">
+        <div class="row"><span class="k">PROFILE</span><span class="v">Guilherme</span></div>
+        <div class="row"><span class="k">CONFIDENCE</span><span class="v ok">87.3%</span></div>
+        <div class="row"><span class="k">SAMPLES</span><span class="v">64/80</span></div>
+        <div class="row"><span class="k">STATUS</span><span class="v ok">AUTHORIZED</span></div>
+      </div>
+    </div>
+
+    <div class="panel" style="flex: 1; overflow: hidden; display: flex; flex-direction: column;">
+      <div class="panel-title">MEMORY STREAM / OBSIDIAN</div>
+      <div class="memory-stream" id="memory-stream">
+        <div class="memory-item"><span class="ts">14:29</span><span class="content">Gosto de tocar Flores no violão à tarde</span></div>
+        <div class="memory-item"><span class="ts">13:58</span><span class="content">Time do coração é o Corinthians</span></div>
+        <div class="memory-item"><span class="ts">12:14</span><span class="content">Trabalho com rede e infra em casa</span></div>
+        <div class="memory-item"><span class="ts">11:02</span><span class="content">Aniversário em 22 de março</span></div>
+        <div class="memory-item"><span class="ts">10:45</span><span class="content">Namorada chama Adriana</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CENTER: ARC REACTOR -->
+  <div class="center">
+    <div class="arc-reactor">
+      <div class="reactor-mode">[ NATIVE AUDIO · AOEDE VOICE ]</div>
+
+      <svg class="arc-ticks" viewBox="0 0 400 400">
+        <g stroke="rgba(0, 212, 255, 0.6)" stroke-width="1">
+          <!-- Major ticks every 30 degrees -->
+          <line x1="200" y1="5"   x2="200" y2="22" stroke-width="2"/>
+          <line x1="200" y1="378" x2="200" y2="395" stroke-width="2"/>
+          <line x1="5"   y1="200" x2="22"  y2="200" stroke-width="2"/>
+          <line x1="378" y1="200" x2="395" y2="200" stroke-width="2"/>
+        </g>
+        <g stroke="rgba(0, 212, 255, 0.35)" stroke-width="1">
+          <!-- Minor ticks -->
+          <g id="minor-ticks"></g>
+        </g>
+        <text x="200" y="18" text-anchor="middle" fill="var(--cyan)" font-family="Orbitron" font-size="10">0°</text>
+        <text x="388" y="204" text-anchor="middle" fill="var(--cyan)" font-family="Orbitron" font-size="10">90</text>
+        <text x="200" y="390" text-anchor="middle" fill="var(--cyan)" font-family="Orbitron" font-size="10">180</text>
+        <text x="12"  y="204" text-anchor="middle" fill="var(--cyan)" font-family="Orbitron" font-size="10">270</text>
+      </svg>
+
+      <div class="arc-ring outer"></div>
+      <div class="arc-ring mid"></div>
+      <div class="arc-ring inner"></div>
+      <div class="freq-bars" id="freq-bars"></div>
+
+      <div class="arc-core">
+        <div class="arc-core-inner"></div>
+      </div>
+
+      <div class="reactor-status">◆ LISTENING ◆</div>
+    </div>
+  </div>
+
+  <!-- RIGHT COLUMN -->
+  <div class="col-right">
+    <div class="panel">
+      <div class="panel-title">SYSTEM VITALS</div>
+      <div class="vitals-row">
+        <div class="vitals-label">CPU</div>
+        <div class="vitals-bar"><div class="vitals-bar-fill" id="cpu-bar" style="width: 23%"></div></div>
+        <div class="vitals-value" id="cpu-val">23%</div>
+      </div>
+      <div class="vitals-row">
+        <div class="vitals-label">RAM</div>
+        <div class="vitals-bar"><div class="vitals-bar-fill" id="ram-bar" style="width: 42%"></div></div>
+        <div class="vitals-value" id="ram-val">42%</div>
+      </div>
+      <div class="vitals-row">
+        <div class="vitals-label">GPU</div>
+        <div class="vitals-bar"><div class="vitals-bar-fill amber" id="gpu-bar" style="width: 68%"></div></div>
+        <div class="vitals-value" id="gpu-val">68%</div>
+      </div>
+      <div class="vitals-row">
+        <div class="vitals-label">NET</div>
+        <div class="vitals-bar"><div class="vitals-bar-fill" id="net-bar" style="width: 18%"></div></div>
+        <div class="vitals-value" id="net-val">2.1M</div>
+      </div>
+      <div class="vitals-row" style="margin-top: 12px;">
+        <div class="vitals-label" style="width: auto;">TEMP</div>
+        <div style="flex: 1; text-align: right; font-family: 'JetBrains Mono', monospace; font-size: 11px;">
+          <span style="color: var(--text-2);">CPU</span> <span style="color: var(--green);">62°C</span>
+          <span style="color: var(--text-2); margin-left: 12px;">GPU</span> <span style="color: var(--amber);">74°C</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" style="flex: 1; overflow: hidden; display: flex; flex-direction: column;">
+      <div class="panel-title">WHATSAPP INBOX <span style="color: var(--red); margin-left: auto;">● 4 NEW</span></div>
+      <div class="wpp-list">
+        <div class="wpp-item">
+          <div class="wpp-avatar">AD</div>
+          <div class="wpp-content">
+            <div class="wpp-name">Adriana</div>
+            <div class="wpp-preview">"amor chegou já?"</div>
+          </div>
+          <div class="wpp-badge">3</div>
+        </div>
+        <div class="wpp-item">
+          <div class="wpp-avatar">PA</div>
+          <div class="wpp-content">
+            <div class="wpp-name">Pai</div>
+            <div class="wpp-preview">"tá livre domingo?"</div>
+          </div>
+          <div class="wpp-badge">1</div>
+        </div>
+        <div class="wpp-item">
+          <div class="wpp-avatar">GF</div>
+          <div class="wpp-content">
+            <div class="wpp-name">Grupo Família</div>
+            <div class="wpp-preview">"12 mensagens novas no grupo"</div>
+          </div>
+          <div class="wpp-badge">12</div>
+        </div>
+        <div class="wpp-item">
+          <div class="wpp-avatar">JO</div>
+          <div class="wpp-content">
+            <div class="wpp-name">João (trabalho)</div>
+            <div class="wpp-preview">"manda aquele pdf rapidinho"</div>
+          </div>
+          <div class="wpp-badge">1</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BOTTOM STRIP -->
+  <div class="bottom-strip">
+    <div class="panel">
+      <div class="panel-title">NOW PLAYING / SPOTIFY</div>
+      <div class="now-playing">
+        <div class="vinyl"></div>
+        <div class="track-info">
+          <div class="artist">ARCTIC MONKEYS</div>
+          <div class="title">Do I Wanna Know?</div>
+          <div class="progress">▶ 2:43 / 4:32</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">CYBERSENTRY / STANDBY</div>
+      <div class="cyber-console" id="cyber-console">
+        <div class="cyber-line ok">[14:28:05] headers OK (HSTS + CSP)</div>
+        <div class="cyber-line warn">[14:28:12] TLS 1.2 detected</div>
+        <div class="cyber-line ok">[14:28:28] 47 rotas mapeadas</div>
+        <div class="cyber-line warn">[14:29:04] 2 subdominios expostos</div>
+        <div class="cyber-line ok">[14:29:40] relatorio salvo em Obsidian</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">QUICK ACTIONS</div>
+      <div class="qa-grid">
+        <button class="qa-btn">Modo Game</button>
+        <button class="qa-btn">Ler WhatsApp</button>
+        <button class="qa-btn">Sentry Cam</button>
+        <button class="qa-btn">Buscar Memória</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TRANSCRIPT -->
+  <div class="transcript">
+    <div class="transcript-line user">
+      <span class="who">[USR]</span><span class="said">Cortana, me mostra o que tem de WhatsApp pendente</span>
+    </div>
+    <div class="transcript-line cortana">
+      <span class="who">[CORTANA]</span><span class="said">Quatro contatos pra você, chefe. Adriana com três, pai com uma, grupo da família soltou doze e o João do trabalho pediu um PDF. Quer que eu resuma?</span>
+    </div>
+  </div>
+
+</div>
+
+<!-- SENTRY CAM (flutuante) -->
+<div class="cam-feed">
+  <div class="panel-title">SENTRY CAM</div>
+  <div class="cam-static"></div>
+  <div class="cam-motion"></div>
+</div>
+
+<script>
+  // Clock
+  function updateClock() {
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    document.getElementById('clock').textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  // Session timer
+  let sessionStart = Date.now() - (12 * 60 + 34) * 1000;
+  setInterval(() => {
+    const elapsed = Math.floor((Date.now() - sessionStart) / 1000);
+    const pad = n => String(n).padStart(2, '0');
+    const h = Math.floor(elapsed / 3600);
+    const m = Math.floor((elapsed % 3600) / 60);
+    const s = elapsed % 60;
+    document.getElementById('session-time').textContent = `${pad(h)}:${pad(m)}:${pad(s)}`;
+  }, 1000);
+
+  // Vitals
+  function mutateVitals() {
+    const apply = (id, bar, target, unit = '%', classes = {}) => {
+      const b = document.getElementById(bar);
+      const v = document.getElementById(id);
+      const pct = unit === '%' ? target : Math.min(100, target * 10);
+      b.style.width = pct + '%';
+      v.textContent = target + (unit === '%' ? '%' : unit);
+      b.classList.remove('amber', 'red');
+      if (classes.red && target >= classes.red) b.classList.add('red');
+      else if (classes.amber && target >= classes.amber) b.classList.add('amber');
+    };
+    apply('cpu-val', 'cpu-bar', Math.round(15 + Math.random() * 35), '%', { amber: 60, red: 80 });
+    apply('ram-val', 'ram-bar', Math.round(35 + Math.random() * 25), '%', { amber: 70, red: 85 });
+    apply('gpu-val', 'gpu-bar', Math.round(45 + Math.random() * 35), '%', { amber: 60, red: 85 });
+    const net = (0.5 + Math.random() * 5).toFixed(1);
+    apply('net-val', 'net-bar', parseFloat(net), 'M');
+  }
+  mutateVitals();
+  setInterval(mutateVitals, 2200);
+
+  // Minor ticks in SVG (SVG radius 195, center 200/200)
+  const minorG = document.getElementById('minor-ticks');
+  for (let deg = 0; deg < 360; deg += 10) {
+    if (deg % 90 === 0) continue;
+    const rad = (deg - 90) * Math.PI / 180;
+    const x1 = 200 + 188 * Math.cos(rad);
+    const y1 = 200 + 188 * Math.sin(rad);
+    const x2 = 200 + 198 * Math.cos(rad);
+    const y2 = 200 + 198 * Math.sin(rad);
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+    line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+    minorG.appendChild(line);
+  }
+
+  // Freq bars ao redor do reactor
+  const freqContainer = document.getElementById('freq-bars');
+  const BAR_COUNT = 56;
+  const BARS = [];
+  for (let i = 0; i < BAR_COUNT; i++) {
+    const bar = document.createElement('div');
+    bar.className = 'freq-bar';
+    const angle = (i / BAR_COUNT) * 360;
+    bar.style.transform = `translate(-50%, 0) rotate(${angle}deg) translateY(-170px)`;
+    bar.style.height = (12 + Math.random() * 28) + 'px';
+    bar.style.opacity = (0.4 + Math.random() * 0.6).toFixed(2);
+    freqContainer.appendChild(bar);
+    BARS.push(bar);
+  }
+  setInterval(() => {
+    BARS.forEach(b => {
+      b.style.height = (8 + Math.random() * 46) + 'px';
+      b.style.opacity = (0.3 + Math.random() * 0.7).toFixed(2);
+    });
+  }, 120);
+
+  // Stream novas memórias
+  const memStream = document.getElementById('memory-stream');
+  const fakeMems = [
+    'Café preto sem açúcar pela manhã',
+    'Boleto do IPVA vence dia 28',
+    'Apple Watch carregado agora',
+    'Reunião quinta às 14h com o time',
+    'Spotify premium expirando em 5 dias',
+    'Preciso trocar o óleo do carro',
+    'Adriana quer ir no parque sábado',
+    'IP da TV da sala: 192.168.1.24',
+  ];
+  setInterval(() => {
+    if (Math.random() > 0.6 && memStream.children.length < 7) {
+      const now = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const ts = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+      const content = fakeMems[Math.floor(Math.random() * fakeMems.length)];
+      const item = document.createElement('div');
+      item.className = 'memory-item';
+      item.innerHTML = `<span class="ts">${ts}</span><span class="content">${content}</span>`;
+      memStream.insertBefore(item, memStream.firstChild);
+      if (memStream.children.length > 6) memStream.removeChild(memStream.lastChild);
+    }
+  }, 5000);
+
+  // CyberSentry scroll
+  const cyberConsole = document.getElementById('cyber-console');
+  const cyberLines = [
+    { cls: 'ok',   msg: 'endpoint /api/health: 200' },
+    { cls: 'warn', msg: 'CORS wildcard em /v1/users' },
+    { cls: 'ok',   msg: 'robots.txt sanitizado' },
+    { cls: 'err',  msg: 'cipher deprecado (3DES)' },
+    { cls: '',     msg: 'parsing /static/app.js...' },
+    { cls: 'ok',   msg: 'nenhum JS secret vazado' },
+    { cls: 'warn', msg: 'headers X-Powered-By expostos' },
+  ];
+  setInterval(() => {
+    const pick = cyberLines[Math.floor(Math.random() * cyberLines.length)];
+    const now = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    const ts = `[${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}]`;
+    const line = document.createElement('div');
+    line.className = 'cyber-line ' + pick.cls;
+    line.textContent = `${ts} ${pick.msg}`;
+    cyberConsole.insertBefore(line, cyberConsole.firstChild);
+    if (cyberConsole.children.length > 7) cyberConsole.removeChild(cyberConsole.lastChild);
+  }, 2800);
+
+  // Reactor status cicla
+  const statusEl = document.querySelector('.reactor-status');
+  const states = ['◆ LISTENING ◆', '◆ STANDBY ◆', '◆ PROCESSING ◆', '◆ SPEAKING ◆'];
+  let stIdx = 0;
+  setInterval(() => {
+    stIdx = (stIdx + 1) % states.length;
+    statusEl.textContent = states[stIdx];
+  }, 4500);
+
+  // Transcript novo
+  const transcript = document.querySelector('.transcript');
+  const convo = [
+    { who: 'user',    said: 'Me resume o dia de hoje' },
+    { who: 'cortana', said: 'Três compromissos, duas mensagens urgentes no WhatsApp e o boleto do IPVA vencendo em seis dias, chefe.' },
+    { who: 'user',    said: 'Liga a luz do escritório' },
+    { who: 'cortana', said: 'Broadlink acionado. Luz do escritório ligada.' },
+    { who: 'user',    said: 'Cortana, modo game' },
+    { who: 'cortana', said: 'Modo Game ativado. Vou economizar recursos agora, chefe.' },
+  ];
+  let convoIdx = 0;
+  setInterval(() => {
+    const turn = convo[convoIdx % convo.length];
+    convoIdx++;
+    transcript.innerHTML = '';
+    // previous
+    if (convoIdx > 1) {
+      const prev = convo[(convoIdx - 2) % convo.length];
+      const p = document.createElement('div');
+      p.className = `transcript-line ${prev.who}`;
+      p.innerHTML = `<span class="who">${prev.who === 'user' ? '[USR]' : '[CORTANA]'}</span><span class="said">${prev.said}</span>`;
+      p.style.opacity = '0.5';
+      transcript.appendChild(p);
+    }
+    const cur = document.createElement('div');
+    cur.className = `transcript-line ${turn.who}`;
+    cur.innerHTML = `<span class="who">${turn.who === 'user' ? '[USR]' : '[CORTANA]'}</span><span class="said">${turn.said}</span>`;
+    transcript.appendChild(cur);
+  }, 5000);
+</script>
+
+</body>
+</html>

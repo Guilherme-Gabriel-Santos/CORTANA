@@ -47,8 +47,8 @@ Use os arquivos de exemplo para configurar seu ambiente local:
 
 - A Cortana online atual continua intacta em `Aula automacao/Controle_PC/agent.py`.
 - A nova versao offline roda separada em `Aula automacao/Controle_PC/offline_runtime.py`.
-- As duas compartilham a mesma memoria local em `Aula automacao/Controle_PC/memory/shared/cortana_memory.sqlite3`.
-- Conversas offline continuam gerando snapshots episodicos em `Aula automacao/Controle_PC/memory/episodic`.
+- As duas compartilham a mesma memoria unificada em `Obsidian_Vault/` (Fatos e Episodios em Markdown, com indice semantico em `.index/embeddings.jsonl`).
+- Conversas continuam gerando snapshots episodicos em `Obsidian_Vault/Episodios/`.
 
 ### Como usar
 
@@ -58,21 +58,19 @@ Use os arquivos de exemplo para configurar seu ambiente local:
 - Runner PowerShell do app desktop: `Aula automacao/Controle_PC/run_cortana_offline_desktop.ps1`
 - Build do executavel desktop: `Aula automacao/Controle_PC/build_cortana_offline_desktop.ps1`
 - Dependencias dedicadas da versao offline: `Aula automacao/Controle_PC/requirements-offline.txt`
-- Sincronizacao manual da memoria online para a memoria local: `Aula automacao/Controle_PC/sync_mem0_to_shared.py`
 
 ### Stack da versao offline
 
 - LLM local: Ollama
 - STT local: faster-whisper
 - TTS principal: Edge TTS com fallback local do Windows
-- Memoria compartilhada: SQLite local + snapshots JSON
+- Memoria unificada: Obsidian Vault (Markdown) com indice semantico via embeddings
 - Ferramentas: reaproveita a automacao Python ja existente sem depender de navegador
 
 ### Compartilhamento de memoria
 
-- A versao online passa a hidratar automaticamente a memoria compartilhada local com o que ja existe no Mem0 cloud.
-- A versao offline pode importar essa memoria manualmente pelo script ou pelo botao do app desktop.
-- Assim, a online continua sendo a versao conectada e a offline usa a mesma base local sempre que ela for sincronizada.
+- Online e offline escrevem e leem do mesmo `Obsidian_Vault/`, entao qualquer fato ou episodio novo ja fica disponivel para as duas instancias.
+- O indice semantico (`Obsidian_Vault/.index/embeddings.jsonl`) e recompilado automaticamente conforme Fatos/Episodios sao criados, e pode ser reconstruido a qualquer momento pelo botao do app desktop offline.
 
 ### Observacao sobre voz
 

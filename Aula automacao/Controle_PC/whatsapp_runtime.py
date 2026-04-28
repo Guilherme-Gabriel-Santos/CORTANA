@@ -44,3 +44,32 @@ async def get_whatsapp_status():
             return {"connected": False, "controller_active": False}
     except Exception:
         return {"connected": False, "controller_active": False}
+
+
+async def save_whatsapp_contact(name: str, number: str):
+    """Salva um alias nome -> numero na agenda manual da Cortana."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            payload = {"name": name, "number": number}
+            response = await client.post(f"{BRIDGE_URL}/contacts", json=payload)
+            if response.status_code == 200:
+                return response.json()
+            try:
+                return response.json()
+            except Exception:
+                return {"success": False, "message": f"Erro HTTP {response.status_code}"}
+    except Exception as exc:
+        logger.error("[WPP Runtime] Failed to save contact: %s", exc)
+        return {"success": False, "message": str(exc)}
+
+
+async def list_whatsapp_contacts():
+    """Lista os aliases salvos."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.get(f"{BRIDGE_URL}/contacts")
+            if response.status_code == 200:
+                return response.json()
+            return {"aliases": {}, "count": 0}
+    except Exception:
+        return {"aliases": {}, "count": 0}

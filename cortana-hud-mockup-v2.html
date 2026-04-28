@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CORTANA HUD // Mockup v2</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Rajdhani:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg-0: #050410;
+    --bg-1: #0a0618;
+    --cyan: #00d4ff;
+    --cyan-dim: #0089a3;
+    --cyan-glow: rgba(0, 212, 255, 0.4);
+    --electric: #7df9ff;
+    --purple: #bc13fe;
+    --purple-soft: #9a4de8;
+    --purple-deep: #5a1a9e;
+    --purple-glow: rgba(188, 19, 254, 0.45);
+    --amber: #ffb84d;
+    --red: #ff4757;
+    --green: #00ff88;
+    --text-0: #e6e8ff;
+    --text-1: #9ea8d0;
+    --text-2: #5a6280;
+    --grid-line: rgba(138, 80, 220, 0.08);
+    --panel-border: rgba(0, 212, 255, 0.3);
+    --panel-border-alt: rgba(188, 19, 254, 0.3);
+    --panel-bg: rgba(14, 8, 28, 0.72);
+  }
+
+  html, body { height: 100%; }
+  body {
+    background: var(--bg-0);
+    color: var(--text-0);
+    font-family: 'Rajdhani', sans-serif;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* Nebula cyan + roxo */
+  body::before {
+    content: ''; position: fixed; inset: 0; z-index: -3;
+    background:
+      radial-gradient(circle at 50% 45%, rgba(188, 19, 254, 0.12) 0%, transparent 50%),
+      radial-gradient(circle at 50% 45%, rgba(0, 212, 255, 0.08) 0%, transparent 65%),
+      radial-gradient(circle at 15% 85%, rgba(188, 19, 254, 0.08) 0%, transparent 40%),
+      radial-gradient(circle at 85% 15%, rgba(0, 212, 255, 0.06) 0%, transparent 40%),
+      var(--bg-0);
+  }
+
+  body::after {
+    content: ''; position: fixed; inset: 0; z-index: -2;
+    background-image:
+      linear-gradient(var(--grid-line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+    background-size: 60px 60px;
+    mask-image: radial-gradient(ellipse at center, #000 30%, transparent 75%);
+    -webkit-mask-image: radial-gradient(ellipse at center, #000 30%, transparent 75%);
+  }
+
+  .scanlines {
+    position: fixed; inset: 0; pointer-events: none; z-index: 100;
+    background: repeating-linear-gradient(0deg,
+      transparent 0px, transparent 2px,
+      rgba(188, 19, 254, 0.025) 3px, rgba(188, 19, 254, 0.025) 3px);
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.4; transform: scale(1.35); }
+  }
+
+  /* Main grid */
+  .main {
+    display: grid;
+    grid-template-columns: 300px 1fr 300px;
+    grid-template-rows: 1fr auto auto;
+    gap: 18px 24px;
+    padding: 18px 40px 20px;
+    height: calc(100vh - 64px);
+    overflow: hidden;
+  }
+  .col-left, .col-right { display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+  .center { display: flex; align-items: center; justify-content: center; }
+
+  /* Panel base */
+  .panel {
+    background: var(--panel-bg); backdrop-filter: blur(8px);
+    border: 1px solid var(--panel-border);
+    padding: 12px 14px;
+    position: relative;
+  }
+  .panel::before, .panel::after {
+    content: ''; position: absolute; width: 12px; height: 12px;
+  }
+  .panel::before { top: -1px; left: -1px; border-top: 2px solid var(--cyan); border-left: 2px solid var(--cyan); }
+  .panel::after  { bottom: -1px; right: -1px; border-bottom: 2px solid var(--cyan); border-right: 2px solid var(--cyan); }
+
+  /* Variante roxa */
+  .panel.purple { border-color: var(--panel-border-alt); }
+  .panel.purple::before { border-top-color: var(--purple); border-left-color: var(--purple); }
+  .panel.purple::after  { border-bottom-color: var(--purple); border-right-color: var(--purple); }
+  .panel.purple .panel-title { color: var(--purple-soft); }
+  .panel.purple .panel-title::after { background: linear-gradient(90deg, var(--purple), transparent); }
+
+  .panel-title {
+    font-family: 'Orbitron', sans-serif; font-size: 10px; font-weight: 700;
+    letter-spacing: 3px; color: var(--cyan); text-transform: uppercase;
+    margin-bottom: 10px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .panel-title::after { content: ''; flex: 1; height: 1px; background: linear-gradient(90deg, var(--cyan), transparent); }
+
+  /* ==== VITALS (agora no canto sup esq) ==== */
+  .vitals-row { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; }
+  .vitals-label { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-2); width: 32px; }
+  .vitals-bar { flex: 1; height: 9px; background: rgba(0, 212, 255, 0.08); border: 1px solid var(--panel-border); position: relative; }
+  .vitals-bar-fill {
+    position: absolute; top: 0; left: 0; bottom: 0;
+    background: linear-gradient(90deg, var(--cyan), var(--electric));
+    box-shadow: 0 0 8px var(--cyan-glow);
+    transition: width 0.6s ease;
+  }
+  .vitals-bar-fill.amber { background: linear-gradient(90deg, #ff9900, var(--amber)); box-shadow: 0 0 8px rgba(255,184,77,0.5); }
+  .vitals-bar-fill.red   { background: linear-gradient(90deg, #ff4757, #ff7a82); box-shadow: 0 0 8px rgba(255,71,87,0.5); }
+  .vitals-bar-fill.purple { background: linear-gradient(90deg, var(--purple-deep), var(--purple)); box-shadow: 0 0 8px var(--purple-glow); }
+  .vitals-value { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--cyan); width: 52px; text-align: right; }
+
+  .vitals-metrics {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 12px;
+    margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--grid-line);
+  }
+  .vitals-metric { font-family: 'JetBrains Mono', monospace; font-size: 11px; display: flex; justify-content: space-between; }
+  .vitals-metric .k { color: var(--text-2); }
+  .vitals-metric .v { color: var(--text-0); font-weight: 500; }
+  .vitals-metric .v.warn { color: var(--amber); }
+  .vitals-metric .v.ok { color: var(--green); }
+
+  /* Memory stream */
+  .memory-stream { display: flex; flex-direction: column; gap: 5px; max-height: 100%; overflow: hidden; }
+  .memory-item {
+    padding: 6px 8px; border-left: 2px solid var(--purple);
+    background: linear-gradient(90deg, rgba(188, 19, 254, 0.1), rgba(0, 212, 255, 0.04));
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    animation: stream-in 0.6s ease;
+  }
+  .memory-item .ts { color: var(--purple-soft); margin-right: 8px; font-size: 9px; }
+  .memory-item .content { color: var(--text-0); }
+  @keyframes stream-in {
+    from { opacity: 0; transform: translateX(-12px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+
+  /* ==== FACE ID (agora no canto sup dir) ==== */
+  .face-visual {
+    width: 100%; aspect-ratio: 1;
+    background: linear-gradient(135deg, #0e0820, #060414);
+    border: 1px solid var(--panel-border-alt);
+    position: relative; overflow: hidden; margin-bottom: 10px;
+  }
+  .face-silhouette {
+    position: absolute; inset: 22%;
+    border: 2px solid var(--cyan);
+    border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
+    box-shadow: 0 0 22px var(--cyan-glow), inset 0 0 22px var(--cyan-glow);
+  }
+  .face-scan {
+    position: absolute; left: 0; right: 0; height: 2px;
+    background: var(--cyan); box-shadow: 0 0 12px var(--cyan);
+    animation: scan 3s ease-in-out infinite;
+  }
+  @keyframes scan {
+    0%, 100% { top: 10%; opacity: 0.2; }
+    50% { top: 88%; opacity: 1; }
+  }
+  .face-corner { position: absolute; width: 14px; height: 14px; border: 2px solid var(--purple); }
+  .face-corner.tl { top: 8px; left: 8px; border-right: none; border-bottom: none; }
+  .face-corner.tr { top: 8px; right: 8px; border-left: none; border-bottom: none; }
+  .face-corner.bl { bottom: 8px; left: 8px; border-right: none; border-top: none; }
+  .face-corner.br { bottom: 8px; right: 8px; border-left: none; border-top: none; }
+
+  .face-data { font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+  .face-data .row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed var(--grid-line); }
+  .face-data .k { color: var(--text-2); }
+  .face-data .v { color: var(--text-0); }
+  .face-data .v.ok { color: var(--green); }
+
+  /* ==== ORB CENTRAL (anéis concêntricos ondulados — estilo Cortana atual) ==== */
+  .orb-stage {
+    position: relative;
+    width: 440px; height: 440px;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  .orb {
+    position: relative;
+    width: 400px; height: 400px;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  /* Halo de fundo roxo (aura difusa atrás dos anéis) */
+  .orb-glow {
+    position: absolute; inset: 20px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 50%,
+      rgba(188, 19, 254, 0.28) 0%,
+      rgba(188, 19, 254, 0.12) 35%,
+      rgba(90, 26, 158, 0.08) 60%,
+      transparent 80%);
+    filter: blur(14px);
+    animation: orb-glow-breathe 3.6s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes orb-glow-breathe {
+    0%, 100% { transform: scale(1); opacity: 0.9; }
+    50%      { transform: scale(1.06); opacity: 1; }
+  }
+
+  /* Canvas dos anéis concêntricos ondulados */
+  #orb-canvas {
+    position: relative;
+    width: 400px; height: 400px;
+    filter: drop-shadow(0 0 12px rgba(188, 19, 254, 0.5))
+            drop-shadow(0 0 24px rgba(188, 19, 254, 0.25));
+    z-index: 2;
+  }
+
+  /* Keyframe rotate (usado também no vinyl) */
+  @keyframes rotate {
+    from { transform: rotate(0deg); }
+    to   { transform: rotate(360deg); }
+  }
+
+  /* Particulas flutuantes ao redor */
+  .orb-particles {
+    position: absolute; inset: -40px;
+    pointer-events: none;
+    z-index: 3;
+  }
+  .particle {
+    position: absolute; width: 3px; height: 3px;
+    border-radius: 50%;
+    background: var(--electric);
+    box-shadow: 0 0 6px var(--electric);
+    opacity: 0;
+    animation: particle-float 4s linear infinite;
+  }
+  .particle.purple { background: var(--purple-soft); box-shadow: 0 0 6px var(--purple); }
+  @keyframes particle-float {
+    0%   { opacity: 0; transform: translate(0, 0) scale(0); }
+    15%  { opacity: 1; transform: translate(var(--dx-start, 0), var(--dy-start, 0)) scale(1); }
+    100% { opacity: 0; transform: translate(var(--dx-end, 20px), var(--dy-end, -40px)) scale(0.3); }
+  }
+
+  /* ==== WHATSAPP ==== */
+  .wpp-list { display: flex; flex-direction: column; gap: 7px; }
+  .wpp-item {
+    padding: 7px 9px; border: 1px solid var(--panel-border-alt);
+    background: rgba(188, 19, 254, 0.05);
+    display: flex; align-items: center; gap: 9px;
+    transition: all 0.25s;
+  }
+  .wpp-item:hover {
+    background: rgba(188, 19, 254, 0.12);
+    box-shadow: 0 0 10px var(--purple-glow);
+    transform: translateX(2px);
+  }
+  .wpp-avatar {
+    width: 30px; height: 30px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--cyan-dim), var(--purple));
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 11px; color: #140030;
+    box-shadow: 0 0 6px var(--purple-glow);
+  }
+  .wpp-content { flex: 1; min-width: 0; }
+  .wpp-name { font-weight: 600; font-size: 13px; color: var(--text-0); }
+  .wpp-preview {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-1);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .wpp-badge {
+    background: var(--red); color: white;
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 700;
+    padding: 2px 7px; border-radius: 10px;
+    box-shadow: 0 0 8px rgba(255, 71, 87, 0.6);
+  }
+
+  /* Bottom strip */
+  .bottom-strip {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: 1fr 1.4fr 1fr;
+    gap: 18px;
+  }
+
+  .now-playing { display: flex; align-items: center; gap: 12px; }
+  .vinyl {
+    width: 56px; height: 56px; border-radius: 50%;
+    background: radial-gradient(circle, #1a0a2a 40%, #000 100%);
+    border: 2px solid var(--purple);
+    box-shadow: 0 0 14px var(--purple-glow);
+    animation: rotate 4s linear infinite;
+    position: relative; flex-shrink: 0;
+  }
+  .vinyl::after { content: ''; position: absolute; inset: 40%; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+
+  .track-info .artist { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-2); }
+  .track-info .title { font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 14px; color: var(--text-0); }
+  .track-info .progress { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--cyan); margin-top: 3px; }
+
+  .cyber-console { font-family: 'JetBrains Mono', monospace; font-size: 10px; max-height: 110px; overflow: hidden; }
+  .cyber-line { color: var(--text-1); line-height: 1.55; }
+  .cyber-line.ok { color: var(--green); }
+  .cyber-line.warn { color: var(--amber); }
+  .cyber-line.err { color: var(--red); }
+
+  .qa-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+  .qa-btn {
+    background: transparent; border: 1px solid var(--panel-border-alt);
+    color: var(--purple-soft); font-family: 'Rajdhani', sans-serif;
+    font-weight: 600; font-size: 11px; letter-spacing: 1.5px;
+    text-transform: uppercase; padding: 9px 12px; cursor: pointer;
+    transition: all 0.2s; position: relative;
+  }
+  .qa-btn:hover {
+    background: rgba(188, 19, 254, 0.12);
+    box-shadow: 0 0 12px var(--purple-glow);
+    color: var(--electric);
+    border-color: var(--cyan);
+  }
+
+  /* Transcript */
+  .transcript {
+    grid-column: 1 / -1;
+    padding: 14px 40px;
+    margin: 0 -40px -20px;
+    border-top: 1px solid var(--panel-border);
+    background: linear-gradient(180deg, transparent, rgba(188, 19, 254, 0.08));
+  }
+  .transcript-line { font-family: 'Rajdhani', sans-serif; font-size: 16px; margin-bottom: 4px; }
+  .transcript-line .who {
+    font-family: 'Orbitron', sans-serif; font-size: 10px; font-weight: 700;
+    letter-spacing: 2px; margin-right: 12px;
+  }
+  .transcript-line.user .who { color: var(--amber); }
+  .transcript-line.cortana .who {
+    background: linear-gradient(90deg, var(--cyan), var(--purple));
+    background-clip: text; -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 0 6px var(--cyan-glow));
+  }
+  .transcript-line .said { color: var(--text-0); }
+
+  /* Sentry cam */
+  .cam-feed {
+    position: fixed; bottom: 24px; right: 24px;
+    width: 220px; aspect-ratio: 16/9;
+    background: #0a0520;
+    border: 1px solid var(--panel-border-alt);
+    z-index: 90;
+    box-shadow: 0 0 18px var(--purple-glow);
+  }
+  .cam-feed .panel-title { position: absolute; top: 4px; left: 8px; margin: 0; font-size: 8px; color: var(--purple-soft); }
+  .cam-feed::after {
+    content: '● REC'; position: absolute; top: 6px; right: 8px;
+    color: var(--red); font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; font-weight: 700; animation: pulse 1s infinite;
+  }
+  .cam-static {
+    position: absolute; inset: 0;
+    background:
+      radial-gradient(ellipse at 50% 100%, rgba(188, 19, 254, 0.18), transparent 60%),
+      repeating-linear-gradient(0deg, rgba(0, 212, 255, 0.04) 0, rgba(0, 212, 255, 0.04) 1px, transparent 1px, transparent 3px);
+  }
+  .cam-motion {
+    position: absolute; inset: 30% 45% 15% 20%;
+    border: 1px dashed var(--cyan); opacity: 0.7;
+    animation: motion-box 3s ease-in-out infinite alternate;
+  }
+  .cam-motion::before {
+    content: 'MOTION'; position: absolute; top: -14px; left: 0;
+    font-family: 'JetBrains Mono', monospace; font-size: 8px; color: var(--cyan);
+  }
+  @keyframes motion-box {
+    0%   { inset: 30% 45% 15% 20%; }
+    100% { inset: 20% 20% 25% 45%; }
+  }
+
+  .sweep {
+    position: fixed; left: 0; right: 0; height: 80px;
+    background: linear-gradient(180deg, transparent, rgba(188, 19, 254, 0.08), transparent);
+    pointer-events: none; z-index: 50;
+    animation: sweep 9s linear infinite;
+  }
+  @keyframes sweep {
+    0%   { top: -100px; }
+    100% { top: 100vh; }
+  }
+
+
+  .vignette {
+    position: fixed; inset: 0; pointer-events: none; z-index: 80;
+    background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.75) 100%);
+  }
+</style>
+</head>
+<body>
+
+<div class="scanlines"></div>
+<div class="vignette"></div>
+<div class="sweep"></div>
+<!-- MAIN GRID -->
+<div class="main">
+
+  <!-- LEFT COLUMN: System Vitals + Memory Stream -->
+  <div class="col-left">
+    <div class="panel">
+      <div class="panel-title">SYSTEM VITALS</div>
+      <div class="vitals-row">
+        <div class="vitals-label">CPU</div>
+        <div class="vitals-bar"><div class="vitals-bar-fill" id="cpu-bar" style="width: 23%"></div></div>
+        <div class="vitals-value" id="cpu-val">23%</div>
+      </div>
+      <div class="vitals-row">
+        <div class="vitals-label">RAM</div>
+        <div class="vitals-bar"><div class="vitals-bar-fill" id="ram-bar" style="width: 42%"></div></div>
+        <div class="vitals-value" id="ram-val">42%</div>
+      </div>
+      <div class="vitals-row">
+        <div class="vitals-label">GPU</div>
+        <div class="vitals-bar"><div class="vitals-bar-fill amber" id="gpu-bar" style="width: 68%"></div></div>
+        <div class="vitals-value" id="gpu-val">68%</div>
+      </div>
+      <div class="vitals-row">
+        <div class="vitals-label">VRAM</div>
+        <div class="vitals-bar"><div class="vitals-bar-fill purple" id="vram-bar" style="width: 51%"></div></div>
+        <div class="vitals-value" id="vram-val">51%</div>
+      </div>
+      <div class="vitals-row">
+        <div class="vitals-label">NET</div>
+        <div class="vitals-bar"><div class="vitals-bar-fill" id="net-bar" style="width: 18%"></div></div>
+        <div class="vitals-value" id="net-val">2.1M</div>
+      </div>
+
+      <div class="vitals-metrics">
+        <div class="vitals-metric"><span class="k">CPU TEMP</span><span class="v ok" id="cpu-temp">62°C</span></div>
+        <div class="vitals-metric"><span class="k">GPU TEMP</span><span class="v warn" id="gpu-temp">74°C</span></div>
+        <div class="vitals-metric"><span class="k">UPTIME</span><span class="v" id="uptime">3d 14h</span></div>
+        <div class="vitals-metric"><span class="k">DISK</span><span class="v">412/1T</span></div>
+        <div class="vitals-metric"><span class="k">FPS HUD</span><span class="v ok" id="fps">60</span></div>
+        <div class="vitals-metric"><span class="k">LATENCY</span><span class="v ok" id="lat">42ms</span></div>
+      </div>
+    </div>
+
+    <div class="panel purple" style="flex: 1; overflow: hidden; display: flex; flex-direction: column;">
+      <div class="panel-title">MEMORY STREAM / OBSIDIAN</div>
+      <div class="memory-stream" id="memory-stream">
+        <div class="memory-item"><span class="ts">14:29</span><span class="content">Gosto de tocar Flores no violão à tarde</span></div>
+        <div class="memory-item"><span class="ts">13:58</span><span class="content">Time do coração é o Corinthians</span></div>
+        <div class="memory-item"><span class="ts">12:14</span><span class="content">Trabalho com rede e infra em casa</span></div>
+        <div class="memory-item"><span class="ts">11:02</span><span class="content">Aniversário em 22 de março</span></div>
+        <div class="memory-item"><span class="ts">10:45</span><span class="content">Namorada chama Adriana</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CENTER: ORB AURA -->
+  <div class="center">
+    <div class="orb-stage">
+      <div class="orb-particles" id="orb-particles"></div>
+
+      <div class="orb">
+        <div class="orb-glow"></div>
+        <canvas id="orb-canvas" width="440" height="440"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- RIGHT COLUMN: Face ID + WhatsApp -->
+  <div class="col-right">
+    <div class="panel purple">
+      <div class="panel-title">FACE ID</div>
+      <div class="face-visual">
+        <div class="face-corner tl"></div><div class="face-corner tr"></div>
+        <div class="face-corner bl"></div><div class="face-corner br"></div>
+        <div class="face-silhouette"></div>
+        <div class="face-scan"></div>
+      </div>
+      <div class="face-data">
+        <div class="row"><span class="k">PROFILE</span><span class="v">Guilherme</span></div>
+        <div class="row"><span class="k">CONFIDENCE</span><span class="v ok">87.3%</span></div>
+        <div class="row"><span class="k">SAMPLES</span><span class="v">64/80</span></div>
+        <div class="row"><span class="k">STATUS</span><span class="v ok">AUTHORIZED</span></div>
+      </div>
+    </div>
+
+    <div class="panel" style="flex: 1; overflow: hidden; display: flex; flex-direction: column;">
+      <div class="panel-title">WHATSAPP INBOX <span style="color: var(--red); margin-left: auto;">● 4 NEW</span></div>
+      <div class="wpp-list">
+        <div class="wpp-item">
+          <div class="wpp-avatar">AD</div>
+          <div class="wpp-content">
+            <div class="wpp-name">Adriana</div>
+            <div class="wpp-preview">"amor chegou já?"</div>
+          </div>
+          <div class="wpp-badge">3</div>
+        </div>
+        <div class="wpp-item">
+          <div class="wpp-avatar">PA</div>
+          <div class="wpp-content">
+            <div class="wpp-name">Pai</div>
+            <div class="wpp-preview">"tá livre domingo?"</div>
+          </div>
+          <div class="wpp-badge">1</div>
+        </div>
+        <div class="wpp-item">
+          <div class="wpp-avatar">GF</div>
+          <div class="wpp-content">
+            <div class="wpp-name">Grupo Família</div>
+            <div class="wpp-preview">"12 mensagens novas no grupo"</div>
+          </div>
+          <div class="wpp-badge">12</div>
+        </div>
+        <div class="wpp-item">
+          <div class="wpp-avatar">JO</div>
+          <div class="wpp-content">
+            <div class="wpp-name">João (trabalho)</div>
+            <div class="wpp-preview">"manda aquele pdf rapidinho"</div>
+          </div>
+          <div class="wpp-badge">1</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BOTTOM STRIP -->
+  <div class="bottom-strip">
+    <div class="panel">
+      <div class="panel-title">NOW PLAYING / SPOTIFY</div>
+      <div class="now-playing">
+        <div class="vinyl"></div>
+        <div class="track-info">
+          <div class="artist">ARCTIC MONKEYS</div>
+          <div class="title">Do I Wanna Know?</div>
+          <div class="progress">▶ 2:43 / 4:32</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-title">CYBERSENTRY / STANDBY</div>
+      <div class="cyber-console" id="cyber-console">
+        <div class="cyber-line ok">[14:28:05] headers OK (HSTS + CSP)</div>
+        <div class="cyber-line warn">[14:28:12] TLS 1.2 detected</div>
+        <div class="cyber-line ok">[14:28:28] 47 rotas mapeadas</div>
+        <div class="cyber-line warn">[14:29:04] 2 subdominios expostos</div>
+        <div class="cyber-line ok">[14:29:40] relatorio salvo em Obsidian</div>
+      </div>
+    </div>
+
+    <div class="panel purple">
+      <div class="panel-title">QUICK ACTIONS</div>
+      <div class="qa-grid">
+        <button class="qa-btn">Modo Game</button>
+        <button class="qa-btn">Ler WhatsApp</button>
+        <button class="qa-btn">Sentry Cam</button>
+        <button class="qa-btn">Buscar Memória</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- TRANSCRIPT -->
+  <div class="transcript" id="transcript">
+    <div class="transcript-line user">
+      <span class="who">[USR]</span><span class="said">Cortana, me mostra o que tem de WhatsApp pendente</span>
+    </div>
+    <div class="transcript-line cortana">
+      <span class="who">[CORTANA]</span><span class="said">Quatro contatos pra você, chefe. Adriana com três, pai com uma, grupo da família soltou doze e o João do trabalho pediu um PDF. Quer que eu resuma?</span>
+    </div>
+  </div>
+
+</div>
+
+<div class="cam-feed">
+  <div class="panel-title">SENTRY CAM</div>
+  <div class="cam-static"></div>
+  <div class="cam-motion"></div>
+</div>
+
+<script>
+  // Util
+  function pad(n) { return String(n).padStart(2, '0'); }
+
+  // Vitals
+  function mutateVitals() {
+    const apply = (id, bar, target, unit = '%', classes = {}) => {
+      const b = document.getElementById(bar); const v = document.getElementById(id);
+      const pct = unit === '%' ? target : Math.min(100, target * 10);
+      b.style.width = pct + '%';
+      v.textContent = target + (unit === '%' ? '%' : unit);
+      b.classList.remove('amber', 'red');
+      if (classes.red && target >= classes.red) b.classList.add('red');
+      else if (classes.amber && target >= classes.amber) b.classList.add('amber');
+    };
+    apply('cpu-val', 'cpu-bar', Math.round(15 + Math.random() * 35), '%', { amber: 60, red: 80 });
+    apply('ram-val', 'ram-bar', Math.round(35 + Math.random() * 25), '%', { amber: 70, red: 85 });
+    apply('gpu-val', 'gpu-bar', Math.round(45 + Math.random() * 35), '%', { amber: 60, red: 85 });
+    // VRAM fica roxa sempre (tema), sem threshold
+    document.getElementById('vram-bar').style.width = Math.round(40 + Math.random() * 30) + '%';
+    document.getElementById('vram-val').textContent = Math.round(40 + Math.random() * 30) + '%';
+    const net = (0.5 + Math.random() * 5).toFixed(1);
+    apply('net-val', 'net-bar', parseFloat(net), 'M');
+    // Temps
+    const cpuTemp = Math.round(55 + Math.random() * 20);
+    const gpuTemp = Math.round(65 + Math.random() * 18);
+    const ct = document.getElementById('cpu-temp'); const gt = document.getElementById('gpu-temp');
+    ct.textContent = cpuTemp + '°C'; ct.className = 'v ' + (cpuTemp > 75 ? 'warn' : 'ok');
+    gt.textContent = gpuTemp + '°C'; gt.className = 'v ' + (gpuTemp > 78 ? 'warn' : 'ok');
+    // Latency
+    const lat = Math.round(30 + Math.random() * 40);
+    const el = document.getElementById('lat');
+    el.textContent = lat + 'ms'; el.className = 'v ' + (lat > 60 ? 'warn' : 'ok');
+  }
+  mutateVitals();
+  setInterval(mutateVitals, 2200);
+
+  // ==== ORB — anéis concêntricos ondulados (estilo Cortana atual) ====
+  (function initOrbCanvas(){
+    const canvas = document.getElementById('orb-canvas');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const SIZE = 440;
+    canvas.width = SIZE * dpr;
+    canvas.height = SIZE * dpr;
+    canvas.style.width = SIZE + 'px';
+    canvas.style.height = SIZE + 'px';
+    ctx.scale(dpr, dpr);
+
+    const cx = SIZE / 2;
+    const cy = SIZE / 2;
+
+    const RING_COUNT = 70;     // densidade de linhas
+    const R_INNER    = 70;     // raio do buraco central
+    const R_OUTER    = 195;    // raio externo
+    const SEGMENTS   = 220;    // resolução angular de cada linha
+
+    // seeds por anel (noise offset) para variedade
+    const seeds = Array.from({ length: RING_COUNT }, () => Math.random() * 1000);
+
+    let t = 0;
+
+    function draw(){
+      ctx.clearRect(0, 0, SIZE, SIZE);
+      ctx.lineWidth = 0.8;
+
+      for (let r = 0; r < RING_COUNT; r++) {
+        const p = r / (RING_COUNT - 1);             // 0..1
+        const baseR = R_INNER + p * (R_OUTER - R_INNER);
+        const seed = seeds[r];
+
+        // brilho — mais denso no meio do anel, fadeout nas bordas
+        const bell = Math.sin(p * Math.PI);          // 0..1..0
+        const alpha = 0.18 + bell * 0.55;
+
+        // leve mistura de tons (violeta escuro → magenta claro)
+        const hueMix = 275 + bell * 15;              // 275..290
+        const light  = 35 + bell * 22;               // 35..57%
+        ctx.strokeStyle = `hsla(${hueMix}, 95%, ${light}%, ${alpha})`;
+
+        ctx.beginPath();
+        for (let i = 0; i <= SEGMENTS; i++) {
+          const a = (i / SEGMENTS) * Math.PI * 2;
+
+          // ruído em camadas (simula audio-reactive)
+          const wave =
+            Math.sin(a * 6  + t * 0.9  + seed)        * 3.2 +
+            Math.sin(a * 11 - t * 0.6  + seed * 0.5)  * 2.1 +
+            Math.sin(a * 3  + t * 0.5  + seed * 0.7)  * 4.5 +
+            Math.sin(a * 17 + t * 1.2  + seed * 0.3)  * 1.3;
+
+          // amplitude cresce nos anéis do meio (efeito "audio")
+          const amp = 0.5 + bell * 1.1;
+          const radius = baseR + wave * amp;
+
+          const x = cx + Math.cos(a) * radius;
+          const y = cy + Math.sin(a) * radius;
+          if (i === 0) ctx.moveTo(x, y);
+          else         ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.stroke();
+      }
+
+      t += 0.018;
+      requestAnimationFrame(draw);
+    }
+    draw();
+  })();
+
+  // Partículas flutuando ao redor do orb
+  const particlesContainer = document.getElementById('orb-particles');
+  function spawnParticle() {
+    const p = document.createElement('div');
+    p.className = 'particle' + (Math.random() > 0.5 ? ' purple' : '');
+    const angle = Math.random() * Math.PI * 2;
+    const radius = 150 + Math.random() * 40;
+    const startX = Math.cos(angle) * radius;
+    const startY = Math.sin(angle) * radius;
+    const driftX = (Math.random() - 0.5) * 80;
+    const driftY = -40 - Math.random() * 60;
+    p.style.left = '50%';
+    p.style.top = '50%';
+    p.style.setProperty('--dx-start', startX + 'px');
+    p.style.setProperty('--dy-start', startY + 'px');
+    p.style.setProperty('--dx-end', (startX + driftX) + 'px');
+    p.style.setProperty('--dy-end', (startY + driftY) + 'px');
+    p.style.animationDuration = (3 + Math.random() * 3) + 's';
+    particlesContainer.appendChild(p);
+    setTimeout(() => p.remove(), 6000);
+  }
+  setInterval(spawnParticle, 280);
+
+  // Stream de memórias
+  const memStream = document.getElementById('memory-stream');
+  const fakeMems = [
+    'Café preto sem açúcar pela manhã',
+    'Boleto do IPVA vence dia 28',
+    'Apple Watch carregado agora',
+    'Reunião quinta às 14h com o time',
+    'Spotify premium expirando em 5 dias',
+    'Preciso trocar o óleo do carro',
+    'Adriana quer ir no parque sábado',
+    'IP da TV da sala: 192.168.1.24',
+  ];
+  setInterval(() => {
+    if (Math.random() > 0.6 && memStream.children.length < 7) {
+      const now = new Date();
+      const ts = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+      const content = fakeMems[Math.floor(Math.random() * fakeMems.length)];
+      const item = document.createElement('div');
+      item.className = 'memory-item';
+      item.innerHTML = `<span class="ts">${ts}</span><span class="content">${content}</span>`;
+      memStream.insertBefore(item, memStream.firstChild);
+      if (memStream.children.length > 6) memStream.removeChild(memStream.lastChild);
+    }
+  }, 5000);
+
+  // CyberSentry scroll
+  const cyberConsole = document.getElementById('cyber-console');
+  const cyberLines = [
+    { cls: 'ok', msg: 'endpoint /api/health: 200' },
+    { cls: 'warn', msg: 'CORS wildcard em /v1/users' },
+    { cls: 'ok', msg: 'robots.txt sanitizado' },
+    { cls: 'err', msg: 'cipher deprecado (3DES)' },
+    { cls: '', msg: 'parsing /static/app.js...' },
+    { cls: 'ok', msg: 'nenhum JS secret vazado' },
+    { cls: 'warn', msg: 'headers X-Powered-By expostos' },
+  ];
+  setInterval(() => {
+    const pick = cyberLines[Math.floor(Math.random() * cyberLines.length)];
+    const now = new Date();
+    const ts = `[${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}]`;
+    const line = document.createElement('div');
+    line.className = 'cyber-line ' + pick.cls;
+    line.textContent = `${ts} ${pick.msg}`;
+    cyberConsole.insertBefore(line, cyberConsole.firstChild);
+    if (cyberConsole.children.length > 7) cyberConsole.removeChild(cyberConsole.lastChild);
+  }, 2800);
+
+  // Transcript cycling
+  const transcript = document.getElementById('transcript');
+  const convo = [
+    { who: 'user', said: 'Me resume o dia de hoje' },
+    { who: 'cortana', said: 'Três compromissos, duas mensagens urgentes no WhatsApp e o boleto do IPVA vencendo em seis dias, chefe.' },
+    { who: 'user', said: 'Liga a luz do escritório' },
+    { who: 'cortana', said: 'Broadlink acionado. Luz do escritório ligada.' },
+    { who: 'user', said: 'Cortana, modo game' },
+    { who: 'cortana', said: 'Modo Game ativado. Vou economizar recursos agora, chefe.' },
+  ];
+  let convoIdx = 0;
+  setInterval(() => {
+    const turn = convo[convoIdx % convo.length]; convoIdx++;
+    transcript.innerHTML = '';
+    if (convoIdx > 1) {
+      const prev = convo[(convoIdx - 2) % convo.length];
+      const p = document.createElement('div');
+      p.className = `transcript-line ${prev.who}`;
+      p.innerHTML = `<span class="who">${prev.who === 'user' ? '[USR]' : '[CORTANA]'}</span><span class="said">${prev.said}</span>`;
+      p.style.opacity = '0.5';
+      transcript.appendChild(p);
+    }
+    const cur = document.createElement('div');
+    cur.className = `transcript-line ${turn.who}`;
+    cur.innerHTML = `<span class="who">${turn.who === 'user' ? '[USR]' : '[CORTANA]'}</span><span class="said">${turn.said}</span>`;
+    transcript.appendChild(cur);
+  }, 5000);
+</script>
+
+</body>
+</html>
